@@ -40,8 +40,8 @@ class TodoGraderApp:
     )
     self.add_button.grid(row=0, column=2, padx=5)
 
-    self.task_frame = ttk.Frame(root)
-    self.task_frame.pack(fill="both", expand=True, padx=20, pady=10)
+    self.tasks_frame = ttk.Frame(root)
+    self.tasks_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
     self.grade_label = ttk.Label(
       root,
@@ -63,8 +63,8 @@ class TodoGraderApp:
   
   def add_task(self):
     title = self.task_entry.get().strip()
-    diffculty = self.difficult_box.get()
-    points = self.get_points(diffculty)
+    difficulty = self.difficulty_box.get()
+    points = self.get_points(difficulty)
 
     if not title:
       messagebox.showwarning("Empty Task", "Task can't be empty gang")
@@ -72,7 +72,7 @@ class TodoGraderApp:
     
     task = {
       "title": title,
-      "difficulty": diffculty,
+      "difficulty": difficulty,
       "points": points,
       "completed": False
     }
@@ -94,7 +94,7 @@ class TodoGraderApp:
 
   def delete_task(self, index):
     tasks = get_today_tasks(self.data)
-    removed_task = tasks.pop(index)
+    tasks.pop(index)
 
     save_data(self.data)
     self.refresh_tasks()
