@@ -11,7 +11,7 @@ def load_data():
   with open(DATA_FILE, "r") as file:
     return json.load(file)
 
-def save_data():
+def save_data(data):
   with open(DATA_FILE, "w") as file:
     json.dump(data,file, indent=4)
 
@@ -104,7 +104,7 @@ def calculate_grade(data):
     return 
   
   total_points = sum(task["points"] for task in tasks)
-  completed_points = sum(task["points"] for task in tasks if task["complete"])
+  completed_points = sum(task["points"] for task in tasks if task["completed"])
 
   percentage = round((completed_points / total_points) * 100)
 
@@ -121,7 +121,7 @@ def calculate_grade(data):
   else:
     letter = 'F--- (you suck)'
 
-  print("\n and your Daily Grade is...")
+  print("\nand your Daily Grade is...")
   print(f"Completed Points: {completed_points} / {total_points}")
   print(f"Score: {percentage}%")
   print(f"Grade: {letter}\n")
@@ -162,5 +162,5 @@ def main():
     else:
       print("Not an option, choose an actual one por favor.")
 
-    if __name__ == "__main__":
-      main()
+if __name__ == "__main__":
+  main()
