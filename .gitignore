@@ -1,1 +1,4 @@
 tasks.json
+todo_grader.db
+tasks_backup.json
+__pycache__/
