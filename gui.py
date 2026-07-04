@@ -1,7 +1,16 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from main import load_data, save_data, get_today_tasks
+from storage import (
+    load_data,
+    save_data,
+    get_tasks_for_date,
+    add_task_to_date,
+    set_task_completed,
+    delete_task_at_index
+)
+
+from grading import calculate_grade
 
 class TodoGraderApp:
   def __init__(self, root):
@@ -51,34 +60,16 @@ class TodoGraderApp:
     self.grade_label.pack(pady=10)
 
     self.refresh_tasks()
-
-  def get_points(self, difficulty):
-    if difficulty == "easy":
-      return 1
-    elif difficulty == "medium":
-      return 2
-    elif difficulty == "hard":
-      return 3
-    return 2
   
   def add_task(self):
     title = self.task_entry.get().strip()
     difficulty = self.difficulty_box.get()
-    points = self.get_points(difficulty)
 
     if not title:
-      messagebox.showwarning("Empty Task", "Task can't be empty gang")
-      return
-    
-    task = {
-      "title": title,
-      "difficulty": difficulty,
-      "points": points,
-      "completed": False
-    }
+        messagebox.showwarning("Empty Task", "Task can't be empty gang")
+        return
 
-    tasks = get_today_tasks(self.data)
-    tasks.append(task)
+    add_task_to_date(self.data, title, difficulty)
 
     save_data(self.data)
 
@@ -86,15 +77,13 @@ class TodoGraderApp:
     self.refresh_tasks()
 
   def toggle_task(self, index, completed_value):
-    tasks = get_today_tasks(self.data)
-    tasks[index]["completed"] = completed_value.get()
-    
+    set_task_completed(self.data, index, completed_value.get())
+
     save_data(self.data)
     self.refresh_grade()
 
   def delete_task(self, index):
-    tasks = get_today_tasks(self.data)
-    tasks.pop(index)
+    delete_task_at_index(self.data, index)
 
     save_data(self.data)
     self.refresh_tasks()
@@ -103,7 +92,7 @@ class TodoGraderApp:
     for widget in self.tasks_frame.winfo_children():
       widget.destroy()
     
-    tasks = get_today_tasks(self.data)
+    tasks = get_tasks_for_date(self.data)
 
     if not tasks:
       empty_label = ttk.Label(
@@ -142,34 +131,19 @@ class TodoGraderApp:
     self.refresh_grade()
 
   def refresh_grade(self):
-    tasks = get_today_tasks(self.data)
+    tasks = get_tasks_for_date(self.data)
+    grade = calculate_grade(tasks)
 
     if not tasks:
-      self.grade_label.config(text="Grade: uhh nothing yet lmao")
-      return
-    
-    total_points = sum(task["points"] for task in tasks)
-    completed_points = sum(
-      task["points"] for task in tasks if task["completed"]
-    )
-
-    percentage = round((completed_points / total_points) * 100)
-
-    if percentage == 100:
-      letter = "A++++++"
-    elif percentage >= 90:
-      letter = "A"
-    elif percentage >= 80:
-      letter = "B"
-    elif percentage >= 70:
-      letter = "C"
-    elif percentage >= 60:
-      letter = "D"
-    else:
-      letter = "F------ (you suck)"
+        self.grade_label.config(text="Grade: uhh nothing yet lmao")
+        return
 
     self.grade_label.config(
-      text=f"Grade: {letter} | {percentage}% | {completed_points} / {total_points} pts"
+        text=(
+            f"Grade: {grade['letter']} | "
+            f"{grade['percentage']}% | "
+            f"{grade['completed_points']} / {grade['total_points']} pts"
+        )
     )
 
 if __name__ == "__main__":

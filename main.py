@@ -1,6 +1,12 @@
-import json
-import os
-from datetime import date
+from storage import (
+    load_data,
+    save_data,
+    get_tasks_for_date,
+    add_task_to_date,
+    set_task_completed
+)
+
+from grading import calculate_grade
 
 DATA_FILE = "tasks.json"
 
