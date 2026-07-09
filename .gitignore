@@ -1,4 +1,7 @@
 tasks.json
 todo_grader.db
 tasks_backup.json
+backups/
+venv/
 __pycache__/
+*.pyc
