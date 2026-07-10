@@ -4,6 +4,7 @@ Stats calculations for To-Do Grader.
 All stats are calculated from SQLite data, not from temporary GUI state.
 """
 
+import calendar as calendar_module
 from datetime import date, timedelta
 
 from grading import calculate_grade
@@ -115,6 +116,30 @@ def _get_best_day(points_by_date):
     return {
         "date_key": best_date_key,
         "completed_points": points_by_date[best_date_key],
+    }
+
+
+def get_month_grades(conn, year, month):
+    """
+    Return {date_key: grade_dict} for every day in the given month that has
+    tasks (including habit completions, since those are stored as tasks).
+
+    This reuses calculate_grade so the grading logic itself is not duplicated,
+    and reads everything from SQLite via get_tasks_between_dates in one query.
+    """
+    start_key = f"{year:04d}-{month:02d}-01"
+    last_day_of_month = calendar_module.monthrange(year, month)[1]
+    end_key = f"{year:04d}-{month:02d}-{last_day_of_month:02d}"
+
+    month_tasks = get_tasks_between_dates(conn, start_key, end_key)
+
+    tasks_by_date = {}
+    for task in month_tasks:
+        tasks_by_date.setdefault(task["date_key"], []).append(task)
+
+    return {
+        date_key: calculate_grade(day_tasks)
+        for date_key, day_tasks in tasks_by_date.items()
     }
 
 
