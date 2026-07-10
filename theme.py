@@ -451,13 +451,27 @@ def create_scrollable_frame(parent, bg=BG_APP):
     scrollbar.pack(side="right", fill="y")
 
     def _on_mousewheel(event):
-        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # Windows reports delta in multiples of 120 per notch. macOS reports
+        # small raw deltas (often -1..-3 / 1..3) per scroll tick instead, so
+        # dividing those by 120 would round to 0 and silently do nothing.
+        delta = event.delta
+        notches = delta / 120 if abs(delta) >= 120 else delta
+        canvas.yview_scroll(int(-1 * notches), "units")
+
+    def _on_mousewheel_linux(event):
+        # Linux/X11 has no "delta" on the event at all - it sends separate
+        # Button-4 (scroll up) / Button-5 (scroll down) button events.
+        canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
 
     def _bind_mousewheel(_event):
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+        canvas.bind_all("<Button-5>", _on_mousewheel_linux)
 
     def _unbind_mousewheel(_event):
         canvas.unbind_all("<MouseWheel>")
+        canvas.unbind_all("<Button-4>")
+        canvas.unbind_all("<Button-5>")
 
     canvas.bind("<Enter>", _bind_mousewheel)
     canvas.bind("<Leave>", _unbind_mousewheel)

@@ -212,12 +212,12 @@ class CalendarGradeView:
         )
         day_label.pack(anchor="w", padx=6, pady=(4, 0))
 
-        grade_text = grade["letter"] if grade else "--"
+        grade_text, grade_color = self._get_grade_cell_text_and_color(date_key, today_key, grade)
         grade_label = tk.Label(
             box,
             text=grade_text,
             font=FONT_CALENDAR_GRADE,
-            fg=ACCENT_AMBER if grade else TEXT_SECONDARY,
+            fg=grade_color,
             bg=box_bg,
             wraplength=DAY_BOX_WIDTH - 12,
             justify="left",
@@ -237,6 +237,29 @@ class CalendarGradeView:
         # Clicking anywhere on the box or its labels selects that day.
         for widget in (box, day_label, grade_label):
             widget.bind("<Button-1>", lambda event, key=date_key: self._select_day(key))
+
+    def _get_grade_cell_text_and_color(self, date_key, today_key, grade):
+        """
+        Decide what the day box's grade line should show.
+
+        Only days that have fully passed show a final letter grade. Future
+        dates have no completed history yet, and today is still in progress
+        (tasks/habits can still be checked off), so neither should display a
+        misleading final grade - only the actual calendar date (via real
+        date objects, not string comparison) decides which case applies.
+        """
+        day_date = date.fromisoformat(date_key)
+        today_date = date.fromisoformat(today_key)
+
+        if day_date > today_date:
+            return "--", TEXT_SECONDARY
+
+        if day_date == today_date:
+            return "Today", TEXT_SECONDARY
+
+        grade_text = grade["letter"] if grade else "--"
+        grade_color = ACCENT_AMBER if grade else TEXT_SECONDARY
+        return grade_text, grade_color
 
     def _select_day(self, date_key):
         self.selected_date_key = date_key

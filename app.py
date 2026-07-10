@@ -150,8 +150,18 @@ class TodoGraderApp:
             self.sidebar_buttons[key] = button
 
     def _build_content_area(self, parent):
-        self.content_area = tk.Frame(parent, bg=BG_APP, padx=18, pady=16)
-        self.content_area.pack(side="right", fill="both", expand=True)
+        # The whole main content area (right of the sidebar) scrolls as one
+        # unit so cards/boxes are never clipped when a tab's natural content
+        # is taller than the window - the user can just scroll to reach the
+        # rest instead of it being cut off. The sidebar and terminal panel
+        # live outside this container, so they stay fixed and always visible.
+        content_scroll_container, content_scroll_host = create_scrollable_frame(
+            parent, bg=BG_APP
+        )
+        content_scroll_container.pack(side="right", fill="both", expand=True)
+
+        self.content_area = tk.Frame(content_scroll_host, bg=BG_APP, padx=18, pady=16)
+        self.content_area.pack(fill="both", expand=True)
 
         self.planner_section = tk.Frame(self.content_area, bg=BG_APP)
         self.habits_section = tk.Frame(self.content_area, bg=BG_APP)
