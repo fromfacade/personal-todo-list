@@ -11,9 +11,20 @@ from grading import calculate_grade
 from storage import (
     get_completed_points_by_date,
     get_daily_completion_status,
+    get_focus_goals_between_dates,
+    get_scheduled_habits_between_dates,
+    get_studied_minutes_between_dates,
     get_tasks_between_dates,
     get_today_key,
 )
+
+
+def _flatten_habit_items(habits_by_date):
+    """Turn {date_key: [habit_item, ...]} into one flat list of habit items."""
+    all_items = []
+    for items in habits_by_date.values():
+        all_items.extend(items)
+    return all_items
 
 
 def get_week_start(reference_date=None):
@@ -43,7 +54,8 @@ def calculate_weekly_stats(conn, reference_date=None):
     """
     start_key, end_key = get_week_range(reference_date)
     week_tasks = get_tasks_between_dates(conn, start_key, end_key)
-    week_grade = calculate_grade(week_tasks)
+    week_habits_by_date = get_scheduled_habits_between_dates(conn, start_key, end_key)
+    week_grade = calculate_grade(week_tasks + _flatten_habit_items(week_habits_by_date))
 
     total_points = week_grade["total_points"]
     completed_points = week_grade["completed_points"]
@@ -122,24 +134,77 @@ def _get_best_day(points_by_date):
 def get_month_grades(conn, year, month):
     """
     Return {date_key: grade_dict} for every day in the given month that has
-    tasks (including habit completions, since those are stored as tasks).
+    tasks and/or scheduled habits.
 
-    This reuses calculate_grade so the grading logic itself is not duplicated,
-    and reads everything from SQLite via get_tasks_between_dates in one query.
+    This reuses calculate_grade so the grading logic itself is not duplicated.
+    A day with only scheduled habits (no normal tasks) still gets a grade,
+    since we combine both lists before grading.
     """
     start_key = f"{year:04d}-{month:02d}-01"
     last_day_of_month = calendar_module.monthrange(year, month)[1]
     end_key = f"{year:04d}-{month:02d}-{last_day_of_month:02d}"
 
     month_tasks = get_tasks_between_dates(conn, start_key, end_key)
+    habits_by_date = get_scheduled_habits_between_dates(conn, start_key, end_key)
 
     tasks_by_date = {}
     for task in month_tasks:
         tasks_by_date.setdefault(task["date_key"], []).append(task)
 
+    all_date_keys = set(tasks_by_date) | set(habits_by_date)
+
     return {
-        date_key: calculate_grade(day_tasks)
-        for date_key, day_tasks in tasks_by_date.items()
+        date_key: calculate_grade(
+            tasks_by_date.get(date_key, []) + habits_by_date.get(date_key, [])
+        )
+        for date_key in all_date_keys
+    }
+
+
+def calculate_weekly_focus_stats(conn, reference_date=None):
+    """
+    Weekly study stats: total studied minutes, what fraction of days that
+    had a goal actually hit it, and the single best focus day.
+    """
+    start_key, end_key = get_week_range(reference_date)
+    studied_by_date = get_studied_minutes_between_dates(conn, start_key, end_key)
+    goals_by_date = get_focus_goals_between_dates(conn, start_key, end_key)
+
+    total_studied_minutes = sum(studied_by_date.values())
+
+    days_with_goals = list(goals_by_date.keys())
+    days_goal_met = [
+        date_key
+        for date_key in days_with_goals
+        if studied_by_date.get(date_key, 0) >= goals_by_date[date_key]
+    ]
+
+    if days_with_goals:
+        goal_success_rate = round((len(days_goal_met) / len(days_with_goals)) * 100)
+    else:
+        goal_success_rate = 0
+
+    return {
+        "week_start": start_key,
+        "week_end": end_key,
+        "total_studied_minutes": total_studied_minutes,
+        "goal_success_rate": goal_success_rate,
+        "days_with_goals": len(days_with_goals),
+        "days_goal_met": len(days_goal_met),
+        "best_day": _get_best_focus_day(studied_by_date),
+    }
+
+
+def _get_best_focus_day(studied_by_date):
+    """Return the date with the most studied minutes this week."""
+    if not studied_by_date or max(studied_by_date.values()) <= 0:
+        return {"date_key": None, "studied_minutes": 0}
+
+    best_date_key = max(studied_by_date, key=studied_by_date.get)
+
+    return {
+        "date_key": best_date_key,
+        "studied_minutes": studied_by_date[best_date_key],
     }
 
 

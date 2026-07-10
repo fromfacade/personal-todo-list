@@ -53,6 +53,21 @@ def run_migrations(conn):
         ensure_column(conn, "tasks", "rolled_over_from", "INTEGER")
         ensure_column(conn, "tasks", "recurring_task_id", "INTEGER")
 
+    # Older databases used to store habit completions as task rows linked by
+    # recurring_task_id. Copy those into the new habit_completions table so
+    # old history is not lost, then the tasks side is ignored going forward
+    # (see get_tasks_for_date/get_tasks_between_dates) to avoid double-counting.
+    if table_exists(conn, "tasks") and table_exists(conn, "habit_completions"):
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO habit_completions (habit_id, date_key, completed, completed_at)
+            SELECT recurring_task_id, date_key, completed, created_at
+            FROM tasks
+            WHERE recurring_task_id IS NOT NULL
+            ON CONFLICT(habit_id, date_key) DO NOTHING
+        """)
+        conn.commit()
+
 
 def initialize_database(conn):
     cursor = conn.cursor()
@@ -89,9 +104,92 @@ def initialize_database(conn):
         )
     """)
 
+    # Which weekdays a habit is scheduled for. weekday matches Python's
+    # date.weekday(): 0 = Monday ... 6 = Sunday.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS habit_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            weekday INTEGER NOT NULL,
+            UNIQUE(habit_id, weekday)
+        )
+    """)
+
+    # One row per habit per day it was marked complete/incomplete. Kept
+    # separate from tasks so scheduled-but-not-yet-completed habits can still
+    # count as "possible points" for a day without needing a task row.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS habit_completions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            date_key TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT,
+            UNIQUE(habit_id, date_key)
+        )
+    """)
+
+    # Single-row table holding the user's overall EXP/rank progress.
+    # id is always 1 - there is only ever one row.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_progress (
+            id INTEGER PRIMARY KEY,
+            total_exp INTEGER NOT NULL DEFAULT 0,
+            current_rank TEXT NOT NULL DEFAULT 'F-',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # One row per EXP grant. The UNIQUE constraint is what stops the same
+    # completion from granting EXP more than once: source_id is the task or
+    # habit id (or 0 for day-level bonuses not tied to a specific row), and
+    # source_type distinguishes task/habit/focus_goal_bonus/daily_grade_bonus.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS exp_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_key TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id INTEGER NOT NULL DEFAULT 0,
+            exp_amount INTEGER NOT NULL,
+            description TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_type, source_id, date_key)
+        )
+    """)
+
+    # One study-minutes goal per day. UNIQUE(date_key) keeps "set the goal
+    # again" an update instead of a second row.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS focus_goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_key TEXT NOT NULL UNIQUE,
+            goal_minutes INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # One row per completed focus block. Studied time for a day is just the
+    # sum of duration_minutes for that date_key - no separate running total
+    # to keep in sync.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS focus_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_key TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            started_at TEXT,
+            ended_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_tasks_date
         ON tasks(date_key)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_focus_sessions_date
+        ON focus_sessions(date_key)
     """)
 
     cursor.execute("""
@@ -234,6 +332,9 @@ def get_tasks_for_date(data, date_key=None):
 
     cursor = data.cursor()
 
+    # recurring_task_id IS NULL excludes old-style habit rows: those are
+    # migrated into habit_completions and shown via the habits helpers
+    # instead, so including them here would double-count them.
     cursor.execute("""
         SELECT
             id,
@@ -246,7 +347,7 @@ def get_tasks_for_date(data, date_key=None):
             rolled_over_from,
             recurring_task_id
         FROM tasks
-        WHERE date_key = ?
+        WHERE date_key = ? AND recurring_task_id IS NULL
         ORDER BY id
     """, (date_key,))
 
@@ -401,7 +502,7 @@ def rollover_unfinished_tasks(data, target_date_key=None):
     cursor.execute("""
         SELECT id, title, difficulty, points, recurring_task_id
         FROM tasks
-        WHERE date_key = ? AND completed = 0
+        WHERE date_key = ? AND completed = 0 AND recurring_task_id IS NULL
     """, (previous_date_key,))
 
     source_tasks = cursor.fetchall()
@@ -475,7 +576,12 @@ def get_all_habits(data, active_only=True):
             ORDER BY id
         """)
 
-    return [_row_to_habit(row) for row in cursor.fetchall()]
+    habits = [_row_to_habit(row) for row in cursor.fetchall()]
+
+    for habit in habits:
+        habit["weekdays"] = get_habit_schedule(data, habit["id"])
+
+    return habits
 
 
 def get_habit_by_id(data, habit_id):
@@ -529,74 +635,166 @@ def delete_habit(data, habit_id):
     data.commit()
 
 
-def get_habit_task_for_date(data, habit_id, date_key):
-    """Find the task record created for a habit on a specific date."""
+def update_habit(data, habit_id, title=None, difficulty=None):
+    """Update a habit's title and/or difficulty, recalculating points if needed."""
+    habit = get_habit_by_id(data, habit_id)
+
+    if habit is None:
+        raise ValueError("Habit not found.")
+
+    new_title = title.strip() if title is not None else habit["title"]
+    new_difficulty = difficulty if difficulty is not None else habit["difficulty"]
+
+    if not new_title:
+        raise ValueError("Habit title cannot be empty.")
+
+    if new_difficulty not in ["easy", "medium", "hard"]:
+        new_difficulty = habit["difficulty"]
+
+    new_points = get_points(new_difficulty)
+
+    cursor = data.cursor()
+    cursor.execute("""
+        UPDATE habits
+        SET title = ?, difficulty = ?, points = ?
+        WHERE id = ?
+    """, (new_title, new_difficulty, new_points, habit_id))
+
+    data.commit()
+    return get_habit_by_id(data, habit_id)
+
+
+# --- Habit schedule (which weekdays a habit is active on) ---
+
+
+def get_habit_schedule(data, habit_id):
+    """Return the sorted list of weekdays (0=Monday..6=Sunday) for a habit."""
     cursor = data.cursor()
 
     cursor.execute("""
-        SELECT
-            id,
-            title,
-            date_key,
-            difficulty,
-            points,
-            completed,
-            created_at,
-            rolled_over_from,
-            recurring_task_id
-        FROM tasks
-        WHERE date_key = ? AND recurring_task_id = ?
-        LIMIT 1
-    """, (date_key, habit_id))
+        SELECT weekday
+        FROM habit_schedule
+        WHERE habit_id = ?
+        ORDER BY weekday
+    """, (habit_id,))
+
+    return [row["weekday"] for row in cursor.fetchall()]
+
+
+def set_habit_schedule(data, habit_id, weekdays):
+    """Replace a habit's scheduled weekdays with the given list of ints (0-6)."""
+    cleaned_weekdays = sorted({w for w in weekdays if 0 <= w <= 6})
+
+    cursor = data.cursor()
+    cursor.execute("DELETE FROM habit_schedule WHERE habit_id = ?", (habit_id,))
+
+    for weekday in cleaned_weekdays:
+        cursor.execute("""
+            INSERT INTO habit_schedule (habit_id, weekday)
+            VALUES (?, ?)
+        """, (habit_id, weekday))
+
+    data.commit()
+
+
+# --- Habit completions (per-date, replaces the old task-row approach) ---
+
+
+def get_habit_completion(data, habit_id, date_key):
+    """Return the completion row for a habit on a date, or None."""
+    cursor = data.cursor()
+
+    cursor.execute("""
+        SELECT habit_id, date_key, completed, completed_at
+        FROM habit_completions
+        WHERE habit_id = ? AND date_key = ?
+    """, (habit_id, date_key))
 
     row = cursor.fetchone()
 
     if row is None:
         return None
 
-    return _row_to_task(row)
+    return {
+        "habit_id": row["habit_id"],
+        "date_key": row["date_key"],
+        "completed": bool(row["completed"]),
+        "completed_at": row["completed_at"],
+    }
 
 
-def set_habit_completion_for_date(data, habit_id, date_key, completed):
-    """
-    Create or update a task row that represents habit completion for a date.
-    Habit tasks use recurring_task_id to link back to the habit definition.
-    """
-    habit = get_habit_by_id(data, habit_id)
-
-    if habit is None:
-        raise ValueError("Habit not found.")
-
-    existing_task = get_habit_task_for_date(data, habit_id, date_key)
+def set_habit_completion(data, habit_id, date_key, completed):
+    """Create or update a habit's completion state for a specific date."""
     cursor = data.cursor()
 
-    if existing_task is None:
-        cursor.execute("""
-            INSERT INTO tasks (
-                title,
-                date_key,
-                difficulty,
-                points,
-                completed,
-                recurring_task_id
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            habit["title"],
-            date_key,
-            habit["difficulty"],
-            habit["points"],
-            1 if completed else 0,
-            habit_id,
-        ))
-    else:
-        cursor.execute("""
-            UPDATE tasks
-            SET completed = ?
-            WHERE id = ?
-        """, (1 if completed else 0, existing_task["id"]))
+    cursor.execute("""
+        INSERT INTO habit_completions (habit_id, date_key, completed, completed_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(habit_id, date_key) DO UPDATE SET
+            completed = excluded.completed,
+            completed_at = excluded.completed_at
+    """, (habit_id, date_key, 1 if completed else 0))
 
     data.commit()
+
+
+def get_scheduled_habits_for_date(data, date_key):
+    """
+    Return active habits scheduled for date_key's weekday, shaped like a
+    grade-countable item (has "points"/"completed") plus habit identity
+    fields, so app.py can render them like task cards.
+    """
+    weekday = date.fromisoformat(date_key).weekday()
+    cursor = data.cursor()
+
+    cursor.execute("""
+        SELECT h.id, h.title, h.difficulty, h.points
+        FROM habits h
+        JOIN habit_schedule hs ON hs.habit_id = h.id
+        WHERE h.active = 1 AND hs.weekday = ?
+        ORDER BY h.id
+    """, (weekday,))
+
+    items = []
+    for row in cursor.fetchall():
+        completion = get_habit_completion(data, row["id"], date_key)
+        items.append({
+            "habit_id": row["id"],
+            "title": row["title"],
+            "difficulty": row["difficulty"],
+            "points": row["points"],
+            "completed": bool(completion["completed"]) if completion else False,
+            "date_key": date_key,
+        })
+
+    return items
+
+
+def get_scheduled_habits_between_dates(data, start_date_key, end_date_key):
+    """
+    Return {date_key: [habit_item, ...]} for every day in the range that has
+    at least one scheduled habit. Used for weekly/monthly grade rollups.
+    """
+    start = date.fromisoformat(start_date_key)
+    end = date.fromisoformat(end_date_key)
+
+    result = {}
+    current = start
+    while current <= end:
+        date_key = str(current)
+        habits_today = get_scheduled_habits_for_date(data, date_key)
+
+        if habits_today:
+            result[date_key] = habits_today
+
+        current += timedelta(days=1)
+
+    return result
+
+
+def get_day_grade_items(data, date_key):
+    """Tasks plus scheduled habits for one date, ready for calculate_grade."""
+    return get_tasks_for_date(data, date_key) + get_scheduled_habits_for_date(data, date_key)
 
 
 # --- Stats query helpers (raw data for stats.py) ---
@@ -606,6 +804,7 @@ def get_tasks_between_dates(data, start_date_key, end_date_key):
     """Return all tasks between two ISO date strings, inclusive."""
     cursor = data.cursor()
 
+    # See get_tasks_for_date for why recurring_task_id rows are excluded.
     cursor.execute("""
         SELECT
             id,
@@ -618,7 +817,7 @@ def get_tasks_between_dates(data, start_date_key, end_date_key):
             rolled_over_from,
             recurring_task_id
         FROM tasks
-        WHERE date_key >= ? AND date_key <= ?
+        WHERE date_key >= ? AND date_key <= ? AND recurring_task_id IS NULL
         ORDER BY date_key, id
     """, (start_date_key, end_date_key))
 
@@ -626,7 +825,8 @@ def get_tasks_between_dates(data, start_date_key, end_date_key):
 
 
 def get_completed_points_by_date(data, start_date_key, end_date_key):
-    """Return {date_key: completed_points} for each day in the range."""
+    """Return {date_key: completed_points} for each day in the range, including
+    points from scheduled habits that were completed that day."""
     tasks = get_tasks_between_dates(data, start_date_key, end_date_key)
     points_by_date = {}
 
@@ -638,17 +838,25 @@ def get_completed_points_by_date(data, start_date_key, end_date_key):
         if task["completed"]:
             points_by_date[date_key] += task["points"]
 
+    habits_by_date = get_scheduled_habits_between_dates(data, start_date_key, end_date_key)
+    for date_key, habit_items in habits_by_date.items():
+        points_by_date.setdefault(date_key, 0)
+        for item in habit_items:
+            if item["completed"]:
+                points_by_date[date_key] += item["points"]
+
     return points_by_date
 
 
 def get_daily_completion_status(data, date_key):
     """
-    Return completion info for one day.
-    A day counts as fully complete only when it has tasks and all are done.
+    Return completion info for one day, combining tasks and any habits
+    scheduled for that weekday. A day counts as fully complete only when it
+    has at least one item (task or scheduled habit) and all are done.
     """
-    tasks = get_tasks_for_date(data, date_key)
+    items = get_day_grade_items(data, date_key)
 
-    if not tasks:
+    if not items:
         return {
             "date_key": date_key,
             "has_tasks": False,
@@ -658,9 +866,9 @@ def get_daily_completion_status(data, date_key):
             "completion_percentage": 0,
         }
 
-    total_points = sum(task["points"] for task in tasks)
+    total_points = sum(item["points"] for item in items)
     completed_points = sum(
-        task["points"] for task in tasks if task["completed"]
+        item["points"] for item in items if item["completed"]
     )
 
     percentage = round((completed_points / total_points) * 100) if total_points else 0
@@ -668,8 +876,155 @@ def get_daily_completion_status(data, date_key):
     return {
         "date_key": date_key,
         "has_tasks": True,
-        "all_completed": all(task["completed"] for task in tasks),
+        "all_completed": all(item["completed"] for item in items),
         "total_points": total_points,
         "completed_points": completed_points,
         "completion_percentage": percentage,
     }
+
+
+# --- EXP / rank progress storage ---
+# Rank math itself lives in progression.py; this file only reads/writes the
+# raw rows so progression.py stays free of any SQL.
+
+
+def get_user_progress(data):
+    """Return the single user_progress row, creating a default one if missing."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT id, total_exp, current_rank, updated_at
+        FROM user_progress
+        WHERE id = 1
+    """)
+    row = cursor.fetchone()
+
+    if row is None:
+        cursor.execute("""
+            INSERT INTO user_progress (id, total_exp, current_rank)
+            VALUES (1, 0, 'F-')
+        """)
+        data.commit()
+        return {"total_exp": 0, "current_rank": "F-", "updated_at": None}
+
+    return {
+        "total_exp": row["total_exp"],
+        "current_rank": row["current_rank"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def set_user_progress(data, total_exp, current_rank):
+    """Overwrite the single user_progress row with a new total and rank."""
+    cursor = data.cursor()
+    cursor.execute("""
+        INSERT INTO user_progress (id, total_exp, current_rank, updated_at)
+        VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+            total_exp = excluded.total_exp,
+            current_rank = excluded.current_rank,
+            updated_at = excluded.updated_at
+    """, (total_exp, current_rank))
+    data.commit()
+
+
+def add_exp_event(data, date_key, source_type, source_id, exp_amount, description=None):
+    """
+    Record an EXP grant for (source_type, source_id, date_key).
+
+    Returns True if this was a new grant, or False if an event already
+    existed for that exact combination - this is what stops completing and
+    un-completing the same task/habit from farming EXP more than once.
+    """
+    cursor = data.cursor()
+    cursor.execute("""
+        INSERT INTO exp_events (date_key, source_type, source_id, exp_amount, description)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_id, date_key) DO NOTHING
+    """, (date_key, source_type, source_id, exp_amount, description))
+    data.commit()
+    return cursor.rowcount > 0
+
+
+
+# --- Focus / study tracking storage ---
+# Business logic (formatting, "what counts as goal met") lives in focus.py;
+# this file only reads/writes the raw goal and session rows.
+
+
+def get_focus_goal(data, date_key):
+    """Return {date_key, goal_minutes} for a date, or None if no goal was set."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT date_key, goal_minutes
+        FROM focus_goals
+        WHERE date_key = ?
+    """, (date_key,))
+    row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return {"date_key": row["date_key"], "goal_minutes": row["goal_minutes"]}
+
+
+def set_focus_goal(data, date_key, goal_minutes):
+    """Create or update the study goal (in minutes) for a date."""
+    cursor = data.cursor()
+    cursor.execute("""
+        INSERT INTO focus_goals (date_key, goal_minutes, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(date_key) DO UPDATE SET
+            goal_minutes = excluded.goal_minutes,
+            updated_at = excluded.updated_at
+    """, (date_key, goal_minutes))
+    data.commit()
+
+
+def get_focus_goals_between_dates(data, start_date_key, end_date_key):
+    """Return {date_key: goal_minutes} for every day in the range that has a goal."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT date_key, goal_minutes
+        FROM focus_goals
+        WHERE date_key >= ? AND date_key <= ?
+    """, (start_date_key, end_date_key))
+    return {row["date_key"]: row["goal_minutes"] for row in cursor.fetchall()}
+
+
+def add_focus_session(data, date_key, duration_minutes, started_at=None, ended_at=None):
+    """Record one completed focus block's minutes toward a date's studied time."""
+    cursor = data.cursor()
+    cursor.execute("""
+        INSERT INTO focus_sessions (date_key, duration_minutes, started_at, ended_at)
+        VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+    """, (date_key, duration_minutes, started_at, ended_at))
+    data.commit()
+
+    return {
+        "id": cursor.lastrowid,
+        "date_key": date_key,
+        "duration_minutes": duration_minutes,
+    }
+
+
+def get_studied_minutes_for_date(data, date_key):
+    """Total studied minutes for one date, summed from focus_sessions."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT COALESCE(SUM(duration_minutes), 0) AS total
+        FROM focus_sessions
+        WHERE date_key = ?
+    """, (date_key,))
+    return cursor.fetchone()["total"]
+
+
+def get_studied_minutes_between_dates(data, start_date_key, end_date_key):
+    """Return {date_key: total_studied_minutes} for every day with at least one session."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT date_key, SUM(duration_minutes) AS total
+        FROM focus_sessions
+        WHERE date_key >= ? AND date_key <= ?
+        GROUP BY date_key
+    """, (start_date_key, end_date_key))
+    return {row["date_key"]: row["total"] for row in cursor.fetchall()}

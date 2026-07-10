@@ -39,6 +39,10 @@ CALENDAR_DAY_BG = BG_PANEL_SECONDARY
 CALENDAR_EMPTY_BG = BG_PANEL
 CALENDAR_TODAY_BG = "#2b2418"
 
+# Brighter gold used for S/SS/SSS-tier ranks so they feel more prestigious
+# than the base amber accent, while staying in the same warm color family.
+RANK_SPECIAL_COLOR = "#fff3c4"
+
 # --- Fonts ---
 
 FONT_UI = ("Segoe UI", 10)
@@ -54,6 +58,14 @@ FONT_MONO = ("Consolas", 10)
 FONT_MONO_SMALL = ("Consolas", 9)
 FONT_CALENDAR_DAY = ("Segoe UI", 9, "bold")
 FONT_CALENDAR_GRADE = ("Segoe UI", 10, "bold")
+FONT_RANK_VALUE = ("Segoe UI", 34, "bold")
+
+
+def get_rank_accent_color(rank):
+    """S/SS/SSS-tier ranks get a brighter gold; everything else uses the normal amber."""
+    if rank.startswith("S"):
+        return RANK_SPECIAL_COLOR
+    return ACCENT_AMBER
 
 
 def apply_app_theme(root):
@@ -232,6 +244,61 @@ def create_stat_card(parent, label, value, width=170):
     name_label.pack(anchor="w", pady=(4, 0))
 
     return card, value_label
+
+
+def create_rank_card(parent):
+    """
+    Prominent card for the Stats tab showing the user's rank/EXP progress.
+    Returns (card, rank_value_label, exp_label, next_rank_label,
+    progress_bar) so app.py can update the text/values from
+    progression.get_rank_progress() without rebuilding any widgets.
+    """
+    card, inner = create_card(parent, padding=18)
+
+    tk.Label(
+        inner,
+        text="Rank",
+        font=FONT_SUBHEADING,
+        fg=TEXT_SECONDARY,
+        bg=BG_PANEL,
+    ).pack(anchor="w")
+
+    rank_value_label = tk.Label(
+        inner,
+        text="F-",
+        font=FONT_RANK_VALUE,
+        fg=ACCENT_AMBER,
+        bg=BG_PANEL,
+    )
+    rank_value_label.pack(anchor="w", pady=(2, 8))
+
+    exp_label = tk.Label(
+        inner,
+        text="Total EXP: 0",
+        font=FONT_UI_BOLD,
+        fg=TEXT_PRIMARY,
+        bg=BG_PANEL,
+    )
+    exp_label.pack(anchor="w")
+
+    next_rank_label = tk.Label(
+        inner,
+        text="",
+        font=FONT_UI,
+        fg=TEXT_SECONDARY,
+        bg=BG_PANEL,
+    )
+    next_rank_label.pack(anchor="w", pady=(2, 10))
+
+    progress_bar = ttk.Progressbar(
+        inner,
+        orient="horizontal",
+        mode="determinate",
+        maximum=100,
+    )
+    progress_bar.pack(fill="x")
+
+    return card, rank_value_label, exp_label, next_rank_label, progress_bar
 
 
 def create_sidebar_button(parent, text, command):
