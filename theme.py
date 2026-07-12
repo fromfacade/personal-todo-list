@@ -4,8 +4,12 @@ Visual theme for fromfacade To-Do Grader.
 Central place for colors, fonts, and reusable UI building blocks.
 """
 
+import os
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
+
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 # --- Colors ---
 
@@ -31,6 +35,20 @@ MEDIUM_CHIP_BG = "#3a2f14"
 MEDIUM_CHIP_FG = "#f6c343"
 HARD_CHIP_BG = "#3d1f1a"
 HARD_CHIP_FG = "#e67e22"
+
+# "Completed" badge reuses the easy-chip green so status colors stay
+# consistent across the app instead of introducing a new green.
+COMPLETED_BADGE_BG = EASY_CHIP_BG
+COMPLETED_BADGE_FG = SUCCESS
+
+# Difficulty accent colors for the small left-edge bar on task/habit cards -
+# reuses the same greens/ambers/oranges as the difficulty chips so a card's
+# accent bar and its chip always agree.
+DIFFICULTY_ACCENT_COLORS = {
+    "easy": EASY_CHIP_FG,
+    "medium": MEDIUM_CHIP_FG,
+    "hard": HARD_CHIP_FG,
+}
 
 SIDEBAR_ACTIVE = "#2b2418"
 SIDEBAR_IDLE = BG_PANEL
@@ -59,6 +77,32 @@ FONT_MONO_SMALL = ("Consolas", 9)
 FONT_CALENDAR_DAY = ("Segoe UI", 9, "bold")
 FONT_CALENDAR_GRADE = ("Segoe UI", 10, "bold")
 FONT_RANK_VALUE = ("Segoe UI", 34, "bold")
+
+
+_icon_image_cache = {}
+
+
+def load_icon_image(filename):
+    """
+    Load a small PNG from assets/ as a Tk PhotoImage, cached by filename.
+
+    Never raises: if the file is missing or Tk can't decode it, this
+    returns None and callers simply skip showing that icon, so a missing
+    or corrupt asset never crashes the app.
+    """
+    if filename in _icon_image_cache:
+        return _icon_image_cache[filename]
+
+    path = os.path.join(ASSETS_DIR, filename)
+    image = None
+
+    try:
+        image = tk.PhotoImage(file=path)
+    except (tk.TclError, FileNotFoundError):
+        image = None
+
+    _icon_image_cache[filename] = image
+    return image
 
 
 def get_rank_accent_color(rank):
@@ -161,14 +205,35 @@ def create_header(parent):
     inner = tk.Frame(header, bg=BG_PANEL, padx=20, pady=14)
     inner.pack(fill="both", expand=True)
 
+    top_row = tk.Frame(inner, bg=BG_PANEL)
+    top_row.pack(fill="x")
+
+    brand_row = tk.Frame(top_row, bg=BG_PANEL)
+    brand_row.pack(side="left")
+
+    icon_image = load_icon_image("app_icon_32.png")
+    if icon_image is not None:
+        icon_label = tk.Label(brand_row, image=icon_image, bg=BG_PANEL)
+        icon_label.image = icon_image  # keep a reference so it isn't garbage-collected
+        icon_label.pack(side="left", padx=(0, 10))
+
     brand = tk.Label(
-        inner,
+        brand_row,
         text="fromfacade",
         font=FONT_BRAND,
         fg=ACCENT_AMBER,
         bg=BG_PANEL,
     )
-    brand.pack(anchor="w")
+    brand.pack(side="left")
+
+    os_tag = tk.Label(
+        top_row,
+        text="PRODUCTIVITY OS",
+        font=FONT_MONO_SMALL,
+        fg=ACCENT_BRONZE,
+        bg=BG_PANEL,
+    )
+    os_tag.pack(side="right", anchor="e", pady=(6, 0))
 
     title = tk.Label(
         inner,
@@ -177,18 +242,20 @@ def create_header(parent):
         fg=TEXT_PRIMARY,
         bg=BG_PANEL,
     )
-    title.pack(anchor="w", pady=(2, 0))
+    title.pack(anchor="w", pady=(6, 0))
 
     tagline = tk.Label(
         inner,
-        text="Plan. Focus. Grade your day.",
+        text="Lock in. Make the birds proud.",
         font=FONT_TAGLINE,
         fg=TEXT_SECONDARY,
         bg=BG_PANEL,
     )
     tagline.pack(anchor="w", pady=(2, 0))
 
-    divider = tk.Frame(parent, bg=BORDER_MUTED, height=1)
+    # A bronze (rather than plain muted) divider ties the header into the
+    # same amber/bronze accent language used for buttons and active states.
+    divider = tk.Frame(parent, bg=ACCENT_BRONZE, height=2)
     divider.pack(fill="x")
 
     return header
@@ -254,11 +321,15 @@ def create_rank_card(parent):
     progression.get_rank_progress() without rebuilding any widgets.
     """
     card, inner = create_card(parent, padding=18)
+    # A brighter, thicker border (instead of the standard muted card border)
+    # makes this card read as "the important one" at a glance on the Stats
+    # tab, matching how ranks/EXP are meant to feel prominent and earned.
+    card.configure(highlightbackground=ACCENT_BRONZE, highlightthickness=2)
 
     tk.Label(
         inner,
-        text="Rank",
-        font=FONT_SUBHEADING,
+        text="CURRENT RANK",
+        font=FONT_MONO_SMALL,
         fg=TEXT_SECONDARY,
         bg=BG_PANEL,
     ).pack(anchor="w")
@@ -305,7 +376,7 @@ def create_sidebar_button(parent, text, command):
     """Navigation button for the left sidebar."""
     button = tk.Button(
         parent,
-        text=text,
+        text=f"›  {text}",
         font=FONT_UI_BOLD,
         fg=TEXT_SECONDARY,
         bg=SIDEBAR_IDLE,
@@ -366,7 +437,7 @@ def create_secondary_button(parent, text, command):
     return tk.Button(
         parent,
         text=text,
-        font=FONT_UI,
+        font=FONT_UI_BOLD,
         fg=TEXT_PRIMARY,
         bg=BG_PANEL_SECONDARY,
         activebackground=BORDER_SOFT,
@@ -376,6 +447,8 @@ def create_secondary_button(parent, text, command):
         padx=14,
         pady=8,
         cursor="hand2",
+        highlightbackground=BORDER_SOFT,
+        highlightthickness=1,
         command=command,
     )
 
@@ -385,7 +458,7 @@ def create_danger_button(parent, text, command):
     return tk.Button(
         parent,
         text=text,
-        font=FONT_UI,
+        font=FONT_UI_BOLD,
         fg=TEXT_PRIMARY,
         bg="#4a1f1f",
         activebackground=DANGER,
@@ -395,6 +468,8 @@ def create_danger_button(parent, text, command):
         padx=10,
         pady=6,
         cursor="hand2",
+        highlightbackground="#6b2b2b",
+        highlightthickness=1,
         command=command,
     )
 
@@ -418,6 +493,78 @@ def create_difficulty_chip(parent, difficulty):
         pady=2,
     )
     return chip
+
+
+def create_status_badge(parent, text, bg=COMPLETED_BADGE_BG, fg=COMPLETED_BADGE_FG):
+    """Small pill badge (e.g. "Completed") using the same visual language as
+    the difficulty chips, so status indicators look like one design system."""
+    return tk.Label(
+        parent,
+        text=text,
+        font=("Segoe UI", 8, "bold"),
+        fg=fg,
+        bg=bg,
+        padx=8,
+        pady=2,
+    )
+
+
+def create_difficulty_accent_bar(parent, difficulty, width=4):
+    """
+    Thin colored strip meant to sit on the left edge of a task/habit card,
+    giving an at-a-glance difficulty cue like a real dashboard's status
+    indicator - reuses the difficulty chip colors so the two always agree.
+    """
+    color = DIFFICULTY_ACCENT_COLORS.get(difficulty, MEDIUM_CHIP_FG)
+    bar = tk.Frame(parent, bg=color, width=width)
+    bar.pack_propagate(False)
+    return bar
+
+
+def create_sidebar_rank_badge(parent):
+    """
+    Small always-visible rank/EXP readout pinned to the bottom of the
+    sidebar, so the gamified rank progress stays glanceable no matter which
+    tab is open. Returns (badge_frame, rank_label, exp_label) so app.py can
+    update the text from progression.get_rank_progress() results.
+    """
+    badge = tk.Frame(
+        parent,
+        bg=BG_PANEL_SECONDARY,
+        highlightbackground=BORDER_MUTED,
+        highlightthickness=1,
+    )
+
+    inner = tk.Frame(badge, bg=BG_PANEL_SECONDARY, padx=12, pady=10)
+    inner.pack(fill="both", expand=True)
+
+    tk.Label(
+        inner,
+        text="RANK",
+        font=FONT_MONO_SMALL,
+        fg=TEXT_SECONDARY,
+        bg=BG_PANEL_SECONDARY,
+    ).pack(anchor="w")
+
+    rank_label = tk.Label(
+        inner,
+        text="F-",
+        font=("Segoe UI", 18, "bold"),
+        fg=ACCENT_AMBER,
+        bg=BG_PANEL_SECONDARY,
+    )
+    rank_label.pack(anchor="w", pady=(2, 2))
+
+    exp_label = tk.Label(
+        inner,
+        text="0 EXP",
+        font=FONT_STAT_LABEL,
+        fg=TEXT_SECONDARY,
+        bg=BG_PANEL_SECONDARY,
+    )
+    exp_label.pack(anchor="w")
+
+    return badge, rank_label, exp_label
 
 
 def create_scrollable_frame(parent, bg=BG_APP):
@@ -487,10 +634,13 @@ def create_terminal_panel(parent):
     outer = tk.Frame(parent, bg=BG_APP)
     outer.pack(fill="x", padx=16, pady=(0, 12))
 
+    # A subtle bronze-tinted border (instead of a plain gray one) ties the
+    # terminal into the same amber/bronze accent language as the rest of
+    # the app, instead of looking like a generic gray console window.
     panel = tk.Frame(
         outer,
         bg=BG_TERMINAL,
-        highlightbackground=BORDER_SOFT,
+        highlightbackground=ACCENT_BRONZE,
         highlightthickness=1,
     )
     panel.pack(fill="both", expand=True)
@@ -513,7 +663,7 @@ def create_terminal_panel(parent):
 
     tk.Label(
         title_bar,
-        text="activity.log",
+        text="fromfacade@productivity-os — activity.log",
         font=FONT_MONO_SMALL,
         fg=TEXT_SECONDARY,
         bg=BG_TERMINAL_TITLE,
@@ -536,8 +686,12 @@ def create_terminal_panel(parent):
     text_widget.configure(state="disabled")
 
     def log_activity(message):
+        # A real timestamp per line (rather than just "> message") is what
+        # makes this read as an actual log/terminal output instead of a
+        # plain list of strings.
+        timestamp = datetime.now().strftime("%H:%M:%S")
         text_widget.configure(state="normal")
-        text_widget.insert("end", f"> {message}\n")
+        text_widget.insert("end", f"[{timestamp}] > {message}\n")
         text_widget.see("end")
         text_widget.configure(state="disabled")
 

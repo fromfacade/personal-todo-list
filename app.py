@@ -1,3 +1,4 @@
+import os
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -48,6 +49,7 @@ from storage import (
 )
 from theme import (
     ACCENT_AMBER,
+    ASSETS_DIR,
     BG_APP,
     BG_PANEL,
     BG_PANEL_SECONDARY,
@@ -63,6 +65,7 @@ from theme import (
     apply_app_theme,
     create_card,
     create_danger_button,
+    create_difficulty_accent_bar,
     create_difficulty_chip,
     create_header,
     create_hero,
@@ -71,12 +74,41 @@ from theme import (
     create_scrollable_frame,
     create_secondary_button,
     create_sidebar_button,
+    create_sidebar_rank_badge,
     create_stat_card,
+    create_status_badge,
     create_terminal_panel,
     get_rank_accent_color,
     set_sidebar_button_active,
     style_toplevel,
 )
+
+
+def _load_app_icon(root):
+    """
+    Set the window/taskbar icon from assets/app_icon.ico (Windows) and
+    assets/app_icon.png (all platforms), without ever crashing the app if
+    the asset files are missing or a platform can't load one of the
+    formats - the window just falls back to Tk's default icon.
+    """
+    ico_path = os.path.join(ASSETS_DIR, "app_icon.ico")
+    png_path = os.path.join(ASSETS_DIR, "app_icon.png")
+
+    if sys.platform == "win32" and os.path.exists(ico_path):
+        try:
+            root.iconbitmap(default=ico_path)
+        except tk.TclError:
+            pass
+
+    if os.path.exists(png_path):
+        try:
+            icon_image = tk.PhotoImage(file=png_path)
+            root.iconphoto(True, icon_image)
+            # Keep a reference alive on the root window - otherwise Python
+            # garbage-collects the image and the taskbar icon can vanish.
+            root._todo_grader_icon_image = icon_image
+        except tk.TclError:
+            pass
 
 
 class TodoGraderApp:
@@ -85,6 +117,8 @@ class TodoGraderApp:
         self.root.title("fromfacade To-Do Grader")
         self.root.geometry("1100x820")
         self.root.minsize(960, 700)
+
+        _load_app_icon(root)
 
         apply_app_theme(root)
 
@@ -123,16 +157,28 @@ class TodoGraderApp:
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
+        # Pinned to the bottom of the sidebar (packed with side="bottom")
+        # so the rank/EXP readout stays glanceable on every tab, not just
+        # on the Stats tab, without scrolling away with the main content.
+        (
+            self.sidebar_rank_badge,
+            self.sidebar_rank_label,
+            self.sidebar_exp_label,
+        ) = create_sidebar_rank_badge(sidebar)
+        self.sidebar_rank_badge.pack(side="bottom", fill="x", padx=12, pady=12)
+
         nav_wrap = tk.Frame(sidebar, bg=BG_PANEL, padx=12, pady=16)
         nav_wrap.pack(fill="both", expand=True)
 
         tk.Label(
             nav_wrap,
-            text="Navigation",
+            text="MENU",
             font=FONT_SUBHEADING,
             fg=TEXT_PRIMARY,
             bg=BG_PANEL,
-        ).pack(anchor="w", pady=(0, 12))
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Frame(nav_wrap, bg=BORDER_MUTED, height=1).pack(fill="x", pady=(0, 12))
 
         sections = [
             ("planner", "Daily Planner"),
@@ -219,24 +265,22 @@ class TodoGraderApp:
     # --- Daily Planner ---
 
     def _build_planner_tab(self):
-        # The whole tab uses grid (not pack) so we can guarantee the task
-        # list row always keeps a usable minimum height. With plain pack,
-        # once the header/calendar/input card need more height than the
-        # window has, pack can shrink the task list all the way to zero
-        # and hide it completely instead of just scrolling its contents.
-        self.planner_section.grid_columnconfigure(0, weight=1)
-        self.planner_section.grid_rowconfigure(5, weight=1, minsize=160)
-
+        # Plain pack, top to bottom: header -> summary cards -> calendar ->
+        # add-task form -> scheduled habits -> task list. Nothing here is
+        # height-constrained or independently scrollable - the whole tab
+        # just grows to fit its content, and the main content area's own
+        # scrolling (see _build_content_area) handles the page getting
+        # taller than the window.
         tk.Label(
             self.planner_section,
             text="Daily Planner",
             font=FONT_HEADING,
             fg=TEXT_PRIMARY,
             bg=BG_APP,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ).pack(anchor="w", pady=(0, 12))
 
         summary_row = tk.Frame(self.planner_section, bg=BG_APP)
-        summary_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        summary_row.pack(fill="x", pady=(0, 12))
 
         cards = [
             ("grade", "Grade"),
@@ -260,10 +304,10 @@ class TodoGraderApp:
             on_day_selected=self.on_calendar_day_selected,
             initial_date_key=self.selected_date_key,
         )
-        self.calendar_view.get_widget().grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        self.calendar_view.get_widget().pack(fill="x", pady=(0, 12))
 
         input_card, input_inner = create_card(self.planner_section, padding=14)
-        input_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        input_card.pack(fill="x", pady=(0, 12))
 
         tk.Label(
             input_inner,
@@ -303,7 +347,7 @@ class TodoGraderApp:
         # planner, next to the normal task list, instead of only living in
         # their own separate tab.
         habits_card, habits_inner = create_card(self.planner_section, padding=10)
-        habits_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+        habits_card.pack(fill="x", pady=(0, 12))
 
         tk.Label(
             habits_inner,
@@ -316,8 +360,10 @@ class TodoGraderApp:
         self.planner_habits_frame = tk.Frame(habits_inner, bg=BG_PANEL)
         self.planner_habits_frame.pack(fill="both", expand=True)
 
-        list_card, list_inner = create_card(self.planner_section, padding=10)
-        list_card.grid(row=5, column=0, sticky="nsew")
+        # A plain (non-scrollable) card that grows to fit every task card in
+        # full - no inner scrollbar competing with the main page scroll.
+        list_card, list_inner = create_card(self.planner_section, padding=12)
+        list_card.pack(fill="both", expand=True)
 
         tk.Label(
             list_inner,
@@ -325,10 +371,10 @@ class TodoGraderApp:
             font=FONT_SUBHEADING,
             fg=TEXT_PRIMARY,
             bg=BG_PANEL,
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 10))
 
-        scroll_container, self.tasks_frame = create_scrollable_frame(list_inner, bg=BG_PANEL)
-        scroll_container.pack(fill="both", expand=True)
+        self.tasks_frame = tk.Frame(list_inner, bg=BG_PANEL)
+        self.tasks_frame.pack(fill="both", expand=True)
 
     def add_task(self):
         title = self.task_entry.get().strip()
@@ -520,12 +566,17 @@ class TodoGraderApp:
             bg=card_bg,
             highlightbackground=BORDER_MUTED,
             highlightthickness=1,
-            padx=12,
-            pady=10,
         )
         card.pack(fill="x", pady=6, padx=4)
 
-        top_row = tk.Frame(card, bg=card_bg)
+        # Left accent bar shows the task's difficulty at a glance, like a
+        # status indicator on a dashboard card.
+        create_difficulty_accent_bar(card, task["difficulty"]).pack(side="left", fill="y")
+
+        content = tk.Frame(card, bg=card_bg, padx=12, pady=10)
+        content.pack(side="left", fill="both", expand=True)
+
+        top_row = tk.Frame(content, bg=card_bg)
         top_row.pack(fill="x")
 
         completed_var = tk.BooleanVar(value=completed)
@@ -550,7 +601,7 @@ class TodoGraderApp:
             bg=card_bg,
         ).pack(side="left", padx=(8, 10))
 
-        bottom_row = tk.Frame(card, bg=card_bg)
+        bottom_row = tk.Frame(content, bg=card_bg)
         bottom_row.pack(fill="x", pady=(8, 0))
 
         create_difficulty_chip(bottom_row, task["difficulty"]).pack(side="left")
@@ -564,13 +615,7 @@ class TodoGraderApp:
         ).pack(side="left", padx=(10, 0))
 
         if completed:
-            tk.Label(
-                bottom_row,
-                text="Completed",
-                font=FONT_UI,
-                fg="#2ecc71",
-                bg=card_bg,
-            ).pack(side="left", padx=(12, 0))
+            create_status_badge(bottom_row, "Completed").pack(side="left", padx=(12, 0))
 
         actions = tk.Frame(bottom_row, bg=card_bg)
         actions.pack(side="right")
@@ -671,12 +716,15 @@ class TodoGraderApp:
             bg=card_bg,
             highlightbackground=BORDER_MUTED,
             highlightthickness=1,
-            padx=12,
-            pady=10,
         )
         card.pack(fill="x", pady=6, padx=4)
 
-        top_row = tk.Frame(card, bg=card_bg)
+        create_difficulty_accent_bar(card, habit_item["difficulty"]).pack(side="left", fill="y")
+
+        content = tk.Frame(card, bg=card_bg, padx=12, pady=10)
+        content.pack(side="left", fill="both", expand=True)
+
+        top_row = tk.Frame(content, bg=card_bg)
         top_row.pack(fill="x")
 
         title_font = ("Segoe UI", 11, "overstrike") if completed else ("Segoe UI", 11, "bold")
@@ -690,7 +738,7 @@ class TodoGraderApp:
             bg=card_bg,
         ).pack(side="left")
 
-        bottom_row = tk.Frame(card, bg=card_bg)
+        bottom_row = tk.Frame(content, bg=card_bg)
         bottom_row.pack(fill="x", pady=(8, 0))
 
         create_difficulty_chip(bottom_row, habit_item["difficulty"]).pack(side="left")
@@ -704,13 +752,7 @@ class TodoGraderApp:
         ).pack(side="left", padx=(10, 0))
 
         if completed:
-            tk.Label(
-                bottom_row,
-                text="Completed",
-                font=FONT_UI,
-                fg="#2ecc71",
-                bg=card_bg,
-            ).pack(side="left", padx=(12, 0))
+            create_status_badge(bottom_row, "Completed").pack(side="left", padx=(12, 0))
 
         habit_id = habit_item["habit_id"]
         toggle_button = create_secondary_button if completed else create_primary_button
@@ -756,19 +798,19 @@ class TodoGraderApp:
     # --- Habits ---
 
     def _build_habits_tab(self):
-        # Grid (not pack) so the habit list always keeps a usable minimum
-        # height instead of being squeezed out of view on shorter windows.
-        self.habits_section.grid_columnconfigure(0, weight=1)
-        self.habits_section.grid_rowconfigure(2, weight=1, minsize=160)
-
+        # Plain pack, top to bottom: hero -> add-habit form -> habit list.
+        # The habit list card is NOT height-constrained or independently
+        # scrollable here - it just grows to fit every habit card, and the
+        # main content area's own scrolling (see _build_content_area) is
+        # what handles the page getting taller than the window.
         create_hero(
             self.habits_section,
             "Daily Habits",
             "Small routines that keep the system running.",
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        ).pack(fill="x", pady=(0, 12))
 
         input_card, input_inner = create_card(self.habits_section, padding=14)
-        input_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        input_card.pack(fill="x", pady=(0, 12))
 
         input_row = tk.Frame(input_inner, bg=BG_PANEL)
         input_row.pack(fill="x")
@@ -797,13 +839,21 @@ class TodoGraderApp:
 
         _, self.habit_weekday_vars = self._build_weekday_checkboxes(input_inner)
 
-        list_card, list_inner = create_card(self.habits_section, padding=10)
-        list_card.grid(row=2, column=0, sticky="nsew")
+        # A plain (non-scrollable) card that grows to fit every habit card in
+        # full - no inner scrollbar competing with the main page scroll.
+        list_card, list_inner = create_card(self.habits_section, padding=12)
+        list_card.pack(fill="both", expand=True)
 
-        scroll_container, self.habits_frame = create_scrollable_frame(
-            list_inner, bg=BG_PANEL
-        )
-        scroll_container.pack(fill="both", expand=True)
+        tk.Label(
+            list_inner,
+            text="Your Habits",
+            font=FONT_SUBHEADING,
+            fg=TEXT_PRIMARY,
+            bg=BG_PANEL,
+        ).pack(anchor="w", pady=(0, 10))
+
+        self.habits_frame = tk.Frame(list_inner, bg=BG_PANEL)
+        self.habits_frame.pack(fill="both", expand=True)
 
     def _build_weekday_checkboxes(self, parent):
         """Row of 7 weekday checkboxes. Returns (row_frame, {weekday_index: BooleanVar})."""
@@ -967,12 +1017,15 @@ class TodoGraderApp:
             bg=card_bg,
             highlightbackground=BORDER_MUTED,
             highlightthickness=1,
-            padx=12,
-            pady=10,
         )
         card.pack(fill="x", pady=6, padx=4)
 
-        top_row = tk.Frame(card, bg=card_bg)
+        create_difficulty_accent_bar(card, habit["difficulty"]).pack(side="left", fill="y")
+
+        content = tk.Frame(card, bg=card_bg, padx=12, pady=10)
+        content.pack(side="left", fill="both", expand=True)
+
+        top_row = tk.Frame(content, bg=card_bg)
         top_row.pack(fill="x")
 
         tk.Label(
@@ -983,7 +1036,7 @@ class TodoGraderApp:
             bg=card_bg,
         ).pack(side="left")
 
-        bottom_row = tk.Frame(card, bg=card_bg)
+        bottom_row = tk.Frame(content, bg=card_bg)
         bottom_row.pack(fill="x", pady=(8, 0))
 
         create_difficulty_chip(bottom_row, habit["difficulty"]).pack(side="left")
@@ -1119,10 +1172,11 @@ class TodoGraderApp:
     def refresh_rank_card(self):
         progress = get_user_progress(self.data)
         rank_info = get_rank_progress(progress["total_exp"])
+        rank_color = get_rank_accent_color(rank_info["current_rank"])
 
         self.rank_value_label.config(
             text=rank_info["current_rank"],
-            fg=get_rank_accent_color(rank_info["current_rank"]),
+            fg=rank_color,
         )
         self.rank_exp_label.config(text=f"Total EXP: {progress['total_exp']}")
 
@@ -1137,6 +1191,11 @@ class TodoGraderApp:
             )
 
         self.rank_progress["value"] = rank_info["progress_percentage"]
+
+        # Keep the always-visible sidebar badge in sync with the same numbers
+        # shown on the full rank card in the Stats tab.
+        self.sidebar_rank_label.config(text=rank_info["current_rank"], fg=rank_color)
+        self.sidebar_exp_label.config(text=f"{progress['total_exp']} EXP")
 
     def refresh_stats(self):
         self.refresh_rank_card()
