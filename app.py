@@ -6,10 +6,13 @@ from tkinter import ttk, messagebox
 from calendar_view import CalendarGradeView, FocusCalendarView
 from focus import (
     BREAK_MINUTES,
+    FOCUS_GOAL_PRESETS,
     FOCUS_MINUTES,
     PomodoroTimer,
     format_studied_time,
     get_daily_focus_summary,
+    get_focus_goal_preset_label,
+    get_focus_goal_preset_minutes,
     get_month_focus_summary,
     get_study_goal,
     record_focus_session,
@@ -27,11 +30,15 @@ from habits import (
     toggle_habit_on_date,
 )
 from progression import (
+    MAX_RANK,
     award_daily_grade_bonus,
     award_focus_goal_bonus,
     award_habit_exp,
     award_task_exp,
     get_rank_progress,
+    has_reached_max_rank,
+    prestige,
+    reset_rank,
 )
 from stats import calculate_weekly_focus_stats, calculate_weekly_stats, get_month_grades
 from storage import (
@@ -942,8 +949,16 @@ class TodoGraderApp:
             font=FONT_UI,
         ).grid(row=2, column=0, padx=12, pady=10, sticky="nw")
 
-        weekday_row, weekday_vars = self._build_weekday_checkboxes(dialog)
-        weekday_row.grid(row=2, column=1, padx=12, pady=10, sticky="w")
+        # _build_weekday_checkboxes packs its row into whatever parent it is
+        # given, but this dialog places everything else with grid - and
+        # Tkinter does not allow mixing pack and grid for children of the
+        # very same parent. Wrapping in a plain container frame (itself
+        # placed with grid) gives the checkbox row its own parent to pack
+        # into, so the two geometry managers never collide.
+        weekday_container = tk.Frame(dialog, bg=BG_PANEL)
+        weekday_container.grid(row=2, column=1, padx=12, pady=10, sticky="w")
+
+        _, weekday_vars = self._build_weekday_checkboxes(weekday_container)
 
         for day, var in weekday_vars.items():
             var.set(day in current_weekdays)
@@ -1086,7 +1101,15 @@ class TodoGraderApp:
             self.rank_exp_label,
             self.rank_next_label,
             self.rank_progress,
-        ) = create_rank_card(self.stats_section)
+            self.rank_prestige_label,
+            self.reset_rank_button,
+            self.prestige_button,
+            self.prestige_hint_label,
+        ) = create_rank_card(
+            self.stats_section,
+            on_reset_rank=self.reset_rank_ui,
+            on_prestige=self.prestige_ui,
+        )
         rank_card.pack(fill="x", pady=(0, 12))
 
         top_row = tk.Frame(self.stats_section, bg=BG_APP)
@@ -1192,10 +1215,67 @@ class TodoGraderApp:
 
         self.rank_progress["value"] = rank_info["progress_percentage"]
 
+        self.rank_prestige_label.config(text=f"Prestige: {progress['prestige_count']}")
+
+        # Prestige only ever unlocks once the player has actually reached
+        # the max rank - keep the button disabled (with an explanatory
+        # hint) the rest of the time instead of hiding it, so the layout
+        # never jumps around as EXP is earned.
+        if has_reached_max_rank(rank_info["current_rank"]):
+            self.prestige_button.config(state="normal")
+            self.prestige_hint_label.config(text="")
+        else:
+            self.prestige_button.config(state="disabled")
+            self.prestige_hint_label.config(text=f"Reach {MAX_RANK} to prestige.")
+
         # Keep the always-visible sidebar badge in sync with the same numbers
         # shown on the full rank card in the Stats tab.
         self.sidebar_rank_label.config(text=rank_info["current_rank"], fg=rank_color)
         self.sidebar_exp_label.config(text=f"{progress['total_exp']} EXP")
+
+    def reset_rank_ui(self):
+        confirmed = messagebox.askyesno(
+            "Reset Rank",
+            "Are you sure you want to reset your rank and EXP? Your tasks, "
+            "habits, and focus history will stay, but your progression "
+            "will restart at F-. This cannot be undone.",
+        )
+
+        if not confirmed:
+            return
+
+        reset_rank(self.data)
+        save_data(self.data)
+        self.refresh_rank_card()
+        self.log_activity("rank reset to F-")
+
+    def prestige_ui(self):
+        progress = get_user_progress(self.data)
+
+        if not has_reached_max_rank(progress["current_rank"]):
+            messagebox.showinfo("Prestige Locked", f"Reach {MAX_RANK} to prestige.")
+            return
+
+        confirmed = messagebox.askyesno(
+            "Prestige",
+            "Prestiging resets your rank and EXP back to F- and adds 1 to "
+            "your prestige count. Your tasks, habits, and focus history "
+            "will stay. This cannot be undone.",
+        )
+
+        if not confirmed:
+            return
+
+        try:
+            result = prestige(self.data)
+        except ValueError as error:
+            messagebox.showinfo("Prestige Locked", str(error))
+            return
+
+        save_data(self.data)
+        self.refresh_rank_card()
+        self.log_activity("prestige activated")
+        self.log_activity(f"prestige level increased to {result['prestige_count']}")
 
     def refresh_stats(self):
         self.refresh_rank_card()
@@ -1372,6 +1452,12 @@ class TodoGraderApp:
     def open_set_focus_goal_dialog(self):
         date_key = get_today_key()
         current_goal = get_study_goal(self.data, date_key)
+        current_preset_label = (
+            get_focus_goal_preset_label(current_goal) if current_goal else None
+        )
+        # If the saved goal isn't one of the presets, start on "Custom" with
+        # its exact minute value pre-filled instead of losing that value.
+        custom_prefill = str(current_goal) if (current_goal and current_preset_label is None) else ""
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Study Goal")
@@ -1379,31 +1465,88 @@ class TodoGraderApp:
         dialog.grab_set()
         style_toplevel(dialog)
 
+        current_text = (
+            f"Current goal: {format_studied_time(current_goal)}"
+            if current_goal
+            else "No goal set for today yet."
+        )
         tk.Label(
             dialog,
-            text="Study goal for today (minutes)",
+            text=current_text,
             fg=TEXT_SECONDARY,
             bg=BG_PANEL,
             font=FONT_UI,
-        ).grid(row=0, column=0, padx=12, pady=10, sticky="w")
+        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(12, 10), sticky="w")
+
+        tk.Label(
+            dialog,
+            text="Quick select",
+            fg=TEXT_SECONDARY,
+            bg=BG_PANEL,
+            font=FONT_UI,
+        ).grid(row=1, column=0, padx=12, pady=6, sticky="w")
+
+        preset_var = tk.StringVar(value=current_preset_label or "Custom")
+        preset_box = ttk.Combobox(
+            dialog,
+            values=[label for label, _minutes in FOCUS_GOAL_PRESETS],
+            textvariable=preset_var,
+            state="readonly",
+            width=14,
+        )
+        preset_box.grid(row=1, column=1, padx=12, pady=6, sticky="w")
+
+        tk.Label(
+            dialog,
+            text="Custom minutes",
+            fg=TEXT_SECONDARY,
+            bg=BG_PANEL,
+            font=FONT_UI,
+        ).grid(row=2, column=0, padx=12, pady=(6, 12), sticky="w")
 
         goal_entry = ttk.Entry(dialog, width=12)
-        goal_entry.grid(row=0, column=1, padx=12, pady=10)
-        goal_entry.insert(0, str(current_goal) if current_goal else "")
+        goal_entry.grid(row=2, column=1, padx=12, pady=(6, 12), sticky="w")
+
+        def sync_goal_entry_to_preset(*_args):
+            """
+            Keep the minutes entry matching whatever is picked in "Quick
+            select" - locked to the preset's fixed value normally, only
+            editable once "Custom" is chosen (see requirement: typing a
+            custom number only counts while Custom is selected).
+            """
+            preset_minutes = get_focus_goal_preset_minutes(preset_var.get())
+
+            goal_entry.config(state="normal")
+            goal_entry.delete(0, tk.END)
+
+            if preset_minutes is None:
+                goal_entry.insert(0, custom_prefill)
+            else:
+                goal_entry.insert(0, str(preset_minutes))
+                goal_entry.config(state="disabled")
+
+        preset_box.bind("<<ComboboxSelected>>", sync_goal_entry_to_preset)
+        sync_goal_entry_to_preset()
 
         button_frame = tk.Frame(dialog, bg=BG_PANEL)
-        button_frame.grid(row=1, column=0, columnspan=2, pady=14)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=14)
 
         def save_goal():
-            raw_value = goal_entry.get().strip()
+            preset_minutes = get_focus_goal_preset_minutes(preset_var.get())
 
-            if not raw_value.isdigit() or int(raw_value) <= 0:
-                messagebox.showwarning(
-                    "Invalid Goal", "Enter a whole number of minutes greater than 0."
-                )
-                return
+            if preset_minutes is not None:
+                goal_minutes = preset_minutes
+            else:
+                raw_value = goal_entry.get().strip()
 
-            goal_minutes = int(raw_value)
+                if not raw_value.isdigit() or int(raw_value) <= 0:
+                    messagebox.showwarning(
+                        "Invalid Goal", "Enter a whole number of minutes greater than 0."
+                    )
+                    return
+
+                goal_minutes = int(raw_value)
+
             set_study_goal(self.data, goal_minutes, date_key=date_key)
             save_data(self.data)
 
@@ -1413,7 +1556,7 @@ class TodoGraderApp:
             self.log_activity(f"goal set: {goal_minutes} min")
             self._check_focus_goal_bonus(date_key)
 
-        create_primary_button(button_frame, "Save", save_goal).pack(side="left", padx=6)
+        create_primary_button(button_frame, "Save Goal", save_goal).pack(side="left", padx=6)
         create_secondary_button(button_frame, "Cancel", dialog.destroy).pack(side="left", padx=6)
 
     # --- Focus: Pomodoro timer card ---

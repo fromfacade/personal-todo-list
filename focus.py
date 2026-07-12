@@ -135,6 +135,41 @@ def get_study_goal(conn, date_key=None):
     return goal["goal_minutes"] if goal else None
 
 
+# Quick-select study goal presets for the "Set Study Goal" dialog, as
+# (label, minutes) pairs. "Custom" has no fixed minutes - selecting it just
+# unlocks the manual entry field in the dialog instead. Goals are always
+# saved as a plain number of minutes (see set_study_goal above), so these
+# presets are purely a UI convenience and need no database changes.
+FOCUS_GOAL_PRESETS = [
+    ("30 minutes", 30),
+    ("45 minutes", 45),
+    ("1 hour", 60),
+    ("1.5 hours", 90),
+    ("2 hours", 120),
+    ("3 hours", 180),
+    ("4 hours", 240),
+    ("Custom", None),
+]
+
+
+def get_focus_goal_preset_minutes(label):
+    """Minutes for a preset label, or None for "Custom" (or an unknown label)."""
+    for preset_label, minutes in FOCUS_GOAL_PRESETS:
+        if preset_label == label:
+            return minutes
+
+    return None
+
+
+def get_focus_goal_preset_label(goal_minutes):
+    """The preset label matching goal_minutes exactly, or None if it's a custom value."""
+    for preset_label, minutes in FOCUS_GOAL_PRESETS:
+        if minutes == goal_minutes:
+            return preset_label
+
+    return None
+
+
 # --- Sessions / studied time ---
 
 

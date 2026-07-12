@@ -68,6 +68,50 @@ def run_migrations(conn):
         """)
         conn.commit()
 
+    # Rank reset / prestige support: extra user_progress columns for older
+    # databases. All additive (ALTER TABLE ADD COLUMN) so existing
+    # total_exp/current_rank and every other table are left untouched.
+    if table_exists(conn, "user_progress"):
+        ensure_column(conn, "user_progress", "prestige_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "user_progress", "progression_epoch", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "user_progress", "last_reset_at", "TEXT")
+        ensure_column(conn, "user_progress", "last_prestige_at", "TEXT")
+
+    # exp_events needs progression_epoch folded into its UNIQUE constraint
+    # (not just a new column) so a rank reset/prestige can let the same
+    # task/habit/date grant EXP again without deleting the old event row.
+    # SQLite can only change a table's constraints by rebuilding it, so
+    # this copies every existing row across untouched (tagged epoch 0) -
+    # it only runs once, the first time an older database is opened after
+    # this update, and skips entirely on already-migrated or brand-new DBs.
+    if table_exists(conn, "exp_events") and not column_exists(conn, "exp_events", "progression_epoch"):
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE exp_events RENAME TO exp_events_pre_epoch")
+        cursor.execute("""
+            CREATE TABLE exp_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_key TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id INTEGER NOT NULL DEFAULT 0,
+                exp_amount INTEGER NOT NULL,
+                description TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                progression_epoch INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(source_type, source_id, date_key, progression_epoch)
+            )
+        """)
+        cursor.execute("""
+            INSERT INTO exp_events (
+                id, date_key, source_type, source_id, exp_amount,
+                description, created_at, progression_epoch
+            )
+            SELECT id, date_key, source_type, source_id, exp_amount,
+                   description, created_at, 0
+            FROM exp_events_pre_epoch
+        """)
+        cursor.execute("DROP TABLE exp_events_pre_epoch")
+        conn.commit()
+
 
 def initialize_database(conn):
     cursor = conn.cursor()
@@ -130,12 +174,20 @@ def initialize_database(conn):
     """)
 
     # Single-row table holding the user's overall EXP/rank progress.
-    # id is always 1 - there is only ever one row.
+    # id is always 1 - there is only ever one row. prestige_count and
+    # progression_epoch support the rank-reset/prestige feature:
+    # progression_epoch increases each time the user resets or prestiges,
+    # so old exp_events stay in the table as history without counting
+    # toward whether a task/habit/date can grant EXP again.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_progress (
             id INTEGER PRIMARY KEY,
             total_exp INTEGER NOT NULL DEFAULT 0,
             current_rank TEXT NOT NULL DEFAULT 'F-',
+            prestige_count INTEGER NOT NULL DEFAULT 0,
+            progression_epoch INTEGER NOT NULL DEFAULT 0,
+            last_reset_at TEXT,
+            last_prestige_at TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -144,6 +196,9 @@ def initialize_database(conn):
     # completion from granting EXP more than once: source_id is the task or
     # habit id (or 0 for day-level bonuses not tied to a specific row), and
     # source_type distinguishes task/habit/focus_goal_bonus/daily_grade_bonus.
+    # progression_epoch is part of that constraint too, so a rank
+    # reset/prestige (which bumps the epoch) lets the same source grant EXP
+    # again under the new epoch, while its old event row stays as history.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS exp_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,7 +208,8 @@ def initialize_database(conn):
             exp_amount INTEGER NOT NULL,
             description TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(source_type, source_id, date_key)
+            progression_epoch INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(source_type, source_id, date_key, progression_epoch)
         )
     """)
 
@@ -892,7 +948,8 @@ def get_user_progress(data):
     """Return the single user_progress row, creating a default one if missing."""
     cursor = data.cursor()
     cursor.execute("""
-        SELECT id, total_exp, current_rank, updated_at
+        SELECT id, total_exp, current_rank, prestige_count, progression_epoch,
+               last_reset_at, last_prestige_at, updated_at
         FROM user_progress
         WHERE id = 1
     """)
@@ -904,17 +961,35 @@ def get_user_progress(data):
             VALUES (1, 0, 'F-')
         """)
         data.commit()
-        return {"total_exp": 0, "current_rank": "F-", "updated_at": None}
+        return {
+            "total_exp": 0,
+            "current_rank": "F-",
+            "prestige_count": 0,
+            "progression_epoch": 0,
+            "last_reset_at": None,
+            "last_prestige_at": None,
+            "updated_at": None,
+        }
 
     return {
         "total_exp": row["total_exp"],
         "current_rank": row["current_rank"],
+        "prestige_count": row["prestige_count"],
+        "progression_epoch": row["progression_epoch"],
+        "last_reset_at": row["last_reset_at"],
+        "last_prestige_at": row["last_prestige_at"],
         "updated_at": row["updated_at"],
     }
 
 
 def set_user_progress(data, total_exp, current_rank):
-    """Overwrite the single user_progress row with a new total and rank."""
+    """Overwrite the total EXP/rank on the single user_progress row.
+
+    Only touches total_exp/current_rank - prestige_count and
+    progression_epoch (see reset_user_progress/prestige_user_progress)
+    are left exactly as they were, since a normal EXP gain should never
+    change either of those.
+    """
     cursor = data.cursor()
     cursor.execute("""
         INSERT INTO user_progress (id, total_exp, current_rank, updated_at)
@@ -927,20 +1002,72 @@ def set_user_progress(data, total_exp, current_rank):
     data.commit()
 
 
-def add_exp_event(data, date_key, source_type, source_id, exp_amount, description=None):
+def reset_user_progress(data):
     """
-    Record an EXP grant for (source_type, source_id, date_key).
+    Reset rank/EXP back to the starting point (F-, 0 EXP) without touching
+    prestige_count or any other table (tasks, habits, focus, etc. are
+    untouched). Bumps progression_epoch so exp_events recorded before the
+    reset stay in the table as history but no longer block the same
+    task/habit/date from granting EXP again under the new epoch.
+    """
+    get_user_progress(data)  # make sure the row exists first
+    cursor = data.cursor()
+    cursor.execute("""
+        UPDATE user_progress
+        SET total_exp = 0,
+            current_rank = 'F-',
+            progression_epoch = progression_epoch + 1,
+            last_reset_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    """)
+    data.commit()
+
+
+def prestige_user_progress(data):
+    """
+    Reset rank/EXP back to the starting point (like reset_user_progress)
+    and add 1 to prestige_count. Returns the new prestige_count.
+    """
+    get_user_progress(data)  # make sure the row exists first
+    cursor = data.cursor()
+    cursor.execute("""
+        UPDATE user_progress
+        SET total_exp = 0,
+            current_rank = 'F-',
+            prestige_count = prestige_count + 1,
+            progression_epoch = progression_epoch + 1,
+            last_prestige_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    """)
+    data.commit()
+
+    return get_user_progress(data)["prestige_count"]
+
+
+def add_exp_event(
+    data, date_key, source_type, source_id, exp_amount, description=None, progression_epoch=0
+):
+    """
+    Record an EXP grant for (source_type, source_id, date_key, progression_epoch).
 
     Returns True if this was a new grant, or False if an event already
     existed for that exact combination - this is what stops completing and
-    un-completing the same task/habit from farming EXP more than once.
+    un-completing the same task/habit from farming EXP more than once
+    within the same progression epoch. Resetting/prestiging bumps the
+    epoch, so a task/habit that already granted EXP before a reset can
+    grant it again afterwards without touching its old (now-historical)
+    event row.
     """
     cursor = data.cursor()
     cursor.execute("""
-        INSERT INTO exp_events (date_key, source_type, source_id, exp_amount, description)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(source_type, source_id, date_key) DO NOTHING
-    """, (date_key, source_type, source_id, exp_amount, description))
+        INSERT INTO exp_events (
+            date_key, source_type, source_id, exp_amount, description, progression_epoch
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_id, date_key, progression_epoch) DO NOTHING
+    """, (date_key, source_type, source_id, exp_amount, description, progression_epoch))
     data.commit()
     return cursor.rowcount > 0
 

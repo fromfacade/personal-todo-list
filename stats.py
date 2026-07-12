@@ -79,38 +79,50 @@ def calculate_weekly_stats(conn, reference_date=None):
     }
 
 
+# How far back calculate_current_streak will ever look. Without a cap, a
+# brand-new/empty database (or one with a long unused gap) used to make the
+# loop keep subtracting days forever - eventually walking past date.min and
+# crashing with "OverflowError: date value out of range". This bounds the
+# work to at most a few hundred DB lookups no matter what is in the database.
+MAX_STREAK_LOOKBACK_DAYS = 1000
+
+
 def calculate_current_streak(conn, reference_date=None):
     """
-    Count consecutive days (ending yesterday or today) where every task
-    for that day was completed. Days with no tasks are skipped.
+    Count consecutive days (ending yesterday or today) where every
+    task/habit scheduled for that day was completed.
+
+    A day only counts toward the streak if something was actually
+    scheduled for it (a task or a habit - see get_daily_completion_status)
+    AND everything on it was completed. A day with nothing scheduled stops
+    the streak, except "today" itself, which is allowed to have nothing
+    yet (or still be in progress) without breaking a streak already earned
+    on previous days. Returns 0 if there is no relevant history at all.
     """
     if reference_date is None:
-        current_day = date.today()
-    else:
-        current_day = reference_date
+        reference_date = date.today()
 
     streak = 0
+    current_day = reference_date
 
-    while True:
+    for _ in range(MAX_STREAK_LOOKBACK_DAYS):
         date_key = str(current_day)
-        day_status = get_daily_completion_status(conn, date_key)
 
-        if not day_status["has_tasks"]:
-            # Empty days do not add to the streak, but also do not break it.
-            current_day -= timedelta(days=1)
-            continue
+        try:
+            day_status = get_daily_completion_status(conn, date_key)
+        except (ValueError, OverflowError):
+            # An unreadable/invalid date_key for this day should not crash
+            # the whole stats screen - just stop counting here.
+            break
 
-        if day_status["all_completed"]:
+        if day_status["has_tasks"] and day_status["all_completed"]:
             streak += 1
-            current_day -= timedelta(days=1)
-            continue
+        elif current_day == reference_date:
+            pass
+        else:
+            break
 
-        # Today can be incomplete without breaking a streak that starts yesterday.
-        if current_day == date.today():
-            current_day -= timedelta(days=1)
-            continue
-
-        break
+        current_day -= timedelta(days=1)
 
     return streak
 

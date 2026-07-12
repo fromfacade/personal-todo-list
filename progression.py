@@ -12,6 +12,8 @@ should never compute EXP amounts or rank thresholds itself.
 from storage import (
     add_exp_event,
     get_user_progress,
+    prestige_user_progress,
+    reset_user_progress,
     set_user_progress,
 )
 
@@ -25,6 +27,12 @@ RANKS = [
     "SS-", "SS", "SS+",
     "SSS-", "SSS", "SSS+",
 ]
+
+# The highest rank - reaching this is what unlocks prestiging.
+MAX_RANK = RANKS[-1]
+
+# The rank a reset or a prestige always restarts the player at.
+STARTING_RANK = RANKS[0]
 
 # Total EXP required to REACH each rank, index-aligned with RANKS. The gaps
 # grow steadily larger so later ranks take meaningfully longer, but it is
@@ -158,6 +166,7 @@ def _apply_exp_gain(data, exp_amount):
 
 def award_task_exp(data, task_id, date_key, difficulty, description=None):
     """Award EXP for completing a task, once per task. Returns an award dict, or None if already granted."""
+    current_epoch = get_user_progress(data)["progression_epoch"]
     exp_amount = get_exp_for_difficulty(difficulty)
     was_awarded = add_exp_event(
         data,
@@ -166,6 +175,7 @@ def award_task_exp(data, task_id, date_key, difficulty, description=None):
         source_id=task_id,
         exp_amount=exp_amount,
         description=description,
+        progression_epoch=current_epoch,
     )
 
     if not was_awarded:
@@ -176,6 +186,7 @@ def award_task_exp(data, task_id, date_key, difficulty, description=None):
 
 def award_habit_exp(data, habit_id, date_key, difficulty, description=None):
     """Award EXP for completing a habit on a date, once per habit per date."""
+    current_epoch = get_user_progress(data)["progression_epoch"]
     exp_amount = get_exp_for_difficulty(difficulty)
     was_awarded = add_exp_event(
         data,
@@ -184,6 +195,7 @@ def award_habit_exp(data, habit_id, date_key, difficulty, description=None):
         source_id=habit_id,
         exp_amount=exp_amount,
         description=description,
+        progression_epoch=current_epoch,
     )
 
     if not was_awarded:
@@ -198,6 +210,7 @@ def award_focus_goal_bonus(data, date_key, description="Daily study goal reached
     call every time studied minutes are recalculated - source_id is fixed
     at 0, so only the first call for a given date actually grants EXP.
     """
+    current_epoch = get_user_progress(data)["progression_epoch"]
     exp_amount = FOCUS_GOAL_BONUS_EXP
 
     was_awarded = add_exp_event(
@@ -207,6 +220,7 @@ def award_focus_goal_bonus(data, date_key, description="Daily study goal reached
         source_id=0,
         exp_amount=exp_amount,
         description=description,
+        progression_epoch=current_epoch,
     )
 
     if not was_awarded:
@@ -226,6 +240,8 @@ def award_daily_grade_bonus(data, date_key, percentage):
     if exp_amount <= 0:
         return None
 
+    current_epoch = get_user_progress(data)["progression_epoch"]
+
     was_awarded = add_exp_event(
         data,
         date_key=date_key,
@@ -233,9 +249,57 @@ def award_daily_grade_bonus(data, date_key, percentage):
         source_id=0,
         exp_amount=exp_amount,
         description=f"Daily grade bonus ({percentage}%)",
+        progression_epoch=current_epoch,
     )
 
     if not was_awarded:
         return None
 
     return _apply_exp_gain(data, exp_amount)
+
+
+def has_reached_max_rank(current_rank):
+    """True once the player is at the highest rank (SSS+) and can prestige."""
+    return current_rank == MAX_RANK
+
+
+def reset_rank(data):
+    """
+    Wipe progression back to the very start (F-, 0 EXP) without touching
+    tasks/habits/focus/calendar history, and without changing prestige_count.
+    Returns a small dict describing the change, for logging/UI use.
+    """
+    progress = get_user_progress(data)
+    reset_user_progress(data)
+
+    return {
+        "old_rank": progress["current_rank"],
+        "old_total_exp": progress["total_exp"],
+        "new_rank": STARTING_RANK,
+        "new_total_exp": 0,
+    }
+
+
+def prestige(data):
+    """
+    Once at the max rank, restart progression from F-/0 EXP in exchange for
+    +1 prestige_count, so the user can climb the ranks again. Tasks,
+    habits, focus history, and calendar history are untouched.
+
+    Raises ValueError if the player has not reached MAX_RANK yet - the UI
+    should only call this once the Prestige button is enabled, but this
+    guard keeps the rule true no matter how prestige() gets called.
+    """
+    progress = get_user_progress(data)
+
+    if not has_reached_max_rank(progress["current_rank"]):
+        raise ValueError(f"Reach {MAX_RANK} to prestige.")
+
+    new_prestige_count = prestige_user_progress(data)
+
+    return {
+        "old_rank": progress["current_rank"],
+        "new_rank": STARTING_RANK,
+        "new_total_exp": 0,
+        "prestige_count": new_prestige_count,
+    }

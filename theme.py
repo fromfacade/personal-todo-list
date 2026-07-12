@@ -146,6 +146,11 @@ def apply_app_theme(root):
         insertcolor=TEXT_PRIMARY,
         bordercolor=BORDER_SOFT,
     )
+    style.map(
+        "TEntry",
+        fieldbackground=[("disabled", BG_PANEL)],
+        foreground=[("disabled", TEXT_SECONDARY)],
+    )
     style.configure(
         "TCombobox",
         fieldbackground=BG_PANEL_SECONDARY,
@@ -313,12 +318,16 @@ def create_stat_card(parent, label, value, width=170):
     return card, value_label
 
 
-def create_rank_card(parent):
+def create_rank_card(parent, on_reset_rank=None, on_prestige=None):
     """
-    Prominent card for the Stats tab showing the user's rank/EXP progress.
+    Prominent card for the Stats tab showing the user's rank/EXP progress,
+    plus prestige count and the Reset Rank / Prestige actions.
+
     Returns (card, rank_value_label, exp_label, next_rank_label,
-    progress_bar) so app.py can update the text/values from
-    progression.get_rank_progress() without rebuilding any widgets.
+    progress_bar, prestige_label, reset_rank_button, prestige_button,
+    prestige_hint_label) so app.py can update the text/values from
+    progression.get_rank_progress() and toggle the Prestige button without
+    rebuilding any widgets.
     """
     card, inner = create_card(parent, padding=18)
     # A brighter, thicker border (instead of the standard muted card border)
@@ -369,7 +378,48 @@ def create_rank_card(parent):
     )
     progress_bar.pack(fill="x")
 
-    return card, rank_value_label, exp_label, next_rank_label, progress_bar
+    prestige_label = tk.Label(
+        inner,
+        text="Prestige: 0",
+        font=FONT_UI_BOLD,
+        fg=RANK_SPECIAL_COLOR,
+        bg=BG_PANEL,
+    )
+    prestige_label.pack(anchor="w", pady=(12, 0))
+
+    # Reset Rank (danger/destructive) and Prestige (special amber/gold,
+    # reusing the same button styles used everywhere else in the app) live
+    # side by side, with a hint label that only shows text while Prestige
+    # is locked so the layout does not jump when it becomes available.
+    actions_row = tk.Frame(inner, bg=BG_PANEL)
+    actions_row.pack(fill="x", pady=(10, 0))
+
+    reset_rank_button = create_danger_button(actions_row, "Reset Rank", on_reset_rank)
+    reset_rank_button.pack(side="left")
+
+    prestige_button = create_primary_button(actions_row, "Prestige", on_prestige)
+    prestige_button.pack(side="left", padx=(10, 0))
+
+    prestige_hint_label = tk.Label(
+        actions_row,
+        text="",
+        font=FONT_UI,
+        fg=TEXT_SECONDARY,
+        bg=BG_PANEL,
+    )
+    prestige_hint_label.pack(side="left", padx=(12, 0))
+
+    return (
+        card,
+        rank_value_label,
+        exp_label,
+        next_rank_label,
+        progress_bar,
+        prestige_label,
+        reset_rank_button,
+        prestige_button,
+        prestige_hint_label,
+    )
 
 
 def create_sidebar_button(parent, text, command):
