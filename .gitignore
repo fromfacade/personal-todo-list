@@ -1,18 +1,25 @@
-# Local database / user data
+# Local app data
 todo_grader.db
 *.db
+tasks.json
+tasks_backup.json
 
-# Python
+# Python generated files
 __pycache__/
 *.pyc
+*.pyo
+
+# Virtual environments
 venv/
 .venv/
 
-# PyInstaller builds
+# Backups
+backups/
+
+# PyInstaller
 dist/
 build/
 *.spec
 
-# Backups / local files
-backups/
+# Environment files
 .env
