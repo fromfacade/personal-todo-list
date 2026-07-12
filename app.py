@@ -20,6 +20,7 @@ from focus import (
 )
 from grading import calculate_grade
 from habits import (
+    WEEKDAY_NAMES,
     WEEKDAY_SHORT_NAMES,
     create_habit,
     edit_habit,
@@ -63,9 +64,11 @@ from theme import (
     BORDER_MUTED,
     FONT_HEADING,
     FONT_MONO,
+    FONT_STAT_LABEL,
     FONT_SUBHEADING,
     FONT_TIMER,
     FONT_UI,
+    FONT_UI_BOLD,
     SUCCESS,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
@@ -1021,14 +1024,62 @@ class TodoGraderApp:
             ).pack(pady=24, padx=8)
             return
 
-        for habit in habits:
-            self._build_habit_card(habit)
+        # Group by scheduled weekday (Monday first, matching WEEKDAY_NAMES)
+        # so the list reads like a weekly schedule instead of one flat pile.
+        # A habit scheduled on multiple days is intentionally repeated under
+        # each of its days - that's the whole point of the grouping.
+        habits_by_weekday = {day_index: [] for day_index in range(7)}
+        unscheduled_habits = []
 
-    def _build_habit_card(self, habit):
+        for habit in habits:
+            if habit["weekdays"]:
+                for day_index in habit["weekdays"]:
+                    habits_by_weekday[day_index].append(habit)
+            else:
+                unscheduled_habits.append(habit)
+
+        # Within a day, sort alphabetically by title - there's no other
+        # existing sort order for habits within a single day to preserve.
+        for day_index, day_name in enumerate(WEEKDAY_NAMES):
+            day_habits = sorted(habits_by_weekday[day_index], key=lambda h: h["title"].lower())
+            self._build_weekday_habit_section(day_name, day_habits, is_first=(day_index == 0))
+
+        if unscheduled_habits:
+            unscheduled_habits = sorted(unscheduled_habits, key=lambda h: h["title"].lower())
+            self._build_weekday_habit_section("Unscheduled", unscheduled_habits, is_first=False)
+
+    def _build_weekday_habit_section(self, day_name, day_habits, is_first):
+        section = tk.Frame(self.habits_frame, bg=BG_PANEL)
+        section.pack(fill="x", pady=(0 if is_first else 14, 0))
+
+        tk.Label(
+            section,
+            text=day_name,
+            font=FONT_UI_BOLD,
+            fg=ACCENT_AMBER,
+            bg=BG_PANEL,
+        ).pack(anchor="w")
+
+        tk.Frame(section, bg=BORDER_MUTED, height=1).pack(fill="x", pady=(2, 8))
+
+        if not day_habits:
+            tk.Label(
+                section,
+                text="Nothing yet, is it a lazy day or what?",
+                font=FONT_STAT_LABEL,
+                fg=TEXT_SECONDARY,
+                bg=BG_PANEL,
+            ).pack(anchor="w", padx=4, pady=(0, 2))
+            return
+
+        for habit in day_habits:
+            self._build_habit_card(section, habit)
+
+    def _build_habit_card(self, parent, habit):
         card_bg = BG_PANEL_SECONDARY
 
         card = tk.Frame(
-            self.habits_frame,
+            parent,
             bg=card_bg,
             highlightbackground=BORDER_MUTED,
             highlightthickness=1,
