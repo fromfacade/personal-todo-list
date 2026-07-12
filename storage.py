@@ -238,6 +238,23 @@ def initialize_database(conn):
         )
     """)
 
+    # A single free-text daily notepad entry per date. UNIQUE(date_key) is
+    # what keeps this "one note per day" - saving the same date again
+    # updates that row (see save_daily_note_row's upsert) instead of
+    # creating a duplicate, and also gives this column its own index for
+    # free. AUTOINCREMENT keeps id stable and never reused even after an
+    # update, which is what would let a future feature reference one note
+    # from another without ids shifting around.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS daily_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_key TEXT NOT NULL UNIQUE,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_tasks_date
         ON tasks(date_key)
@@ -1155,3 +1172,59 @@ def get_studied_minutes_between_dates(data, start_date_key, end_date_key):
         GROUP BY date_key
     """, (start_date_key, end_date_key))
     return {row["date_key"]: row["total"] for row in cursor.fetchall()}
+
+
+# --- Notes ---
+
+
+def _row_to_daily_note(row):
+    return {
+        "id": row["id"],
+        "date_key": row["date_key"],
+        "body": row["body"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_daily_note_row(data, date_key):
+    """The single notepad entry for a date, or None if nothing's been saved yet."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT id, date_key, body, created_at, updated_at
+        FROM daily_notes
+        WHERE date_key = ?
+    """, (date_key,))
+    row = cursor.fetchone()
+    return _row_to_daily_note(row) if row else None
+
+
+def save_daily_note_row(data, date_key, body):
+    """
+    Create or update the one notepad entry for date_key. The UNIQUE
+    constraint on daily_notes.date_key makes this an upsert: editing the
+    same date again updates that row in place (keeping its id and
+    created_at) instead of inserting a duplicate.
+    """
+    cursor = data.cursor()
+    cursor.execute("""
+        INSERT INTO daily_notes (date_key, body, created_at, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(date_key) DO UPDATE SET
+            body = excluded.body,
+            updated_at = excluded.updated_at
+    """, (date_key, body))
+    data.commit()
+
+    return get_daily_note_row(data, date_key)
+
+
+def get_note_dates_between_dates(data, start_date_key, end_date_key):
+    """Return the set of date_keys in range that have a saved, non-empty note."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT date_key
+        FROM daily_notes
+        WHERE date_key >= ? AND date_key <= ? AND TRIM(body) <> ''
+    """, (start_date_key, end_date_key))
+    return {row["date_key"] for row in cursor.fetchall()}

@@ -3,7 +3,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from calendar_view import CalendarGradeView, FocusCalendarView
+from calendar_view import CalendarGradeView, FocusCalendarView, NotesCalendarView
 from focus import (
     BREAK_MINUTES,
     FOCUS_GOAL_PRESETS,
@@ -29,6 +29,11 @@ from habits import (
     list_habits,
     remove_habit,
     toggle_habit_on_date,
+)
+from notes import (
+    get_daily_note,
+    get_note_dates_for_month,
+    save_daily_note,
 )
 from progression import (
     MAX_RANK,
@@ -62,6 +67,7 @@ from theme import (
     BG_PANEL,
     BG_PANEL_SECONDARY,
     BORDER_MUTED,
+    BORDER_SOFT,
     FONT_HEADING,
     FONT_MONO,
     FONT_STAT_LABEL,
@@ -92,6 +98,12 @@ from theme import (
     set_sidebar_button_active,
     style_toplevel,
 )
+
+# How long to wait after the user stops typing in the Notes tab's daily
+# notepad before autosaving. Long enough to not save on every keystroke,
+# short enough that a few seconds of inactivity is never at risk of being
+# lost (the Save Note button and tab/date/app-close flushes cover the rest).
+NOTEPAD_AUTOSAVE_DELAY_MS = 1200
 
 
 def _load_app_icon(root):
@@ -195,6 +207,7 @@ class TodoGraderApp:
             ("habits", "Habits"),
             ("stats", "Stats"),
             ("focus", "Focus"),
+            ("notes", "Notes"),
         ]
 
         for key, label in sections:
@@ -223,20 +236,30 @@ class TodoGraderApp:
         self.habits_section = tk.Frame(self.content_area, bg=BG_APP)
         self.stats_section = tk.Frame(self.content_area, bg=BG_APP)
         self.focus_section = tk.Frame(self.content_area, bg=BG_APP)
+        self.notes_section = tk.Frame(self.content_area, bg=BG_APP)
 
         self.sections = {
             "planner": self.planner_section,
             "habits": self.habits_section,
             "stats": self.stats_section,
             "focus": self.focus_section,
+            "notes": self.notes_section,
         }
 
         self._build_planner_tab()
         self._build_habits_tab()
         self._build_stats_tab()
         self._build_focus_tab()
+        self._build_notes_tab()
 
     def show_section(self, section_name):
+        # Leaving the Notes tab with unsaved notepad text would otherwise
+        # risk losing it if the user doesn't come back before closing the
+        # app - flush it first, same as switching calendar days.
+        leaving_section = getattr(self, "current_section_name", None)
+        if leaving_section == "notes" and section_name != "notes":
+            self._save_notepad(source="tab")
+
         for name, frame in self.sections.items():
             frame.pack_forget()
 
@@ -259,7 +282,11 @@ class TodoGraderApp:
             # goal" always reflects the actual current date.
             self.refresh_focus_goal_card()
             self.refresh_focus_calendar()
+        elif section_name == "notes":
+            self.load_daily_note_into_editor(self.selected_note_date_key)
+            self.refresh_notes_calendar()
 
+        self.current_section_name = section_name
         self.log_activity(f"opened {section_name.replace('_', ' ')} section")
 
     def get_selected_date_key(self):
@@ -1765,6 +1792,213 @@ class TodoGraderApp:
     def refresh_focus_calendar(self):
         self.focus_calendar.render()
 
+    # --- Notes: a daily notepad (one free-text note per date) ---
+
+    def _build_notes_tab(self):
+        # Grid (not pack) so the calendar keeps a usable minimum height
+        # instead of being squeezed out on shorter windows, matching the
+        # Focus / Daily Planner / Habits tabs. The notepad row gets more
+        # weight than the calendar row since it's meant to be the main
+        # focus of this tab.
+        self.notes_section.grid_columnconfigure(0, weight=1)
+        self.notes_section.grid_rowconfigure(1, weight=1, minsize=220)
+        self.notes_section.grid_rowconfigure(2, weight=2, minsize=280)
+
+        self.selected_note_date_key = get_today_key()
+        self.notepad_last_saved_body = ""
+        self._notepad_autosave_after_id = None
+
+        create_hero(
+            self.notes_section,
+            "Notes",
+            "A daily scratchpad for thoughts, reminders, and ideas.",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        self.notes_calendar = NotesCalendarView(
+            self.notes_section,
+            get_month_note_dates=lambda year, month: get_note_dates_for_month(
+                self.data, year, month
+            ),
+            on_day_selected=self.on_notes_day_selected,
+            initial_date_key=self.selected_note_date_key,
+        )
+        self.notes_calendar.get_widget().grid(row=1, column=0, sticky="nsew", pady=(0, 12))
+
+        self._build_notepad_card()
+        self.notepad_card.grid(row=2, column=0, sticky="nsew")
+
+        self.load_daily_note_into_editor(self.selected_note_date_key, log=False)
+
+    def on_notes_day_selected(self, date_key):
+        """
+        Called when the user clicks a day box on the Notes calendar.
+        Flushes any unsaved text under the day being left, then loads
+        whatever (if anything) was saved for the newly selected day.
+        """
+        self._save_notepad(source="switch")
+        self.selected_note_date_key = date_key
+        self.load_daily_note_into_editor(date_key)
+
+    def refresh_notes_calendar(self):
+        self.notes_calendar.render()
+
+    # --- Notes: the notepad itself ---
+
+    def _build_notepad_card(self):
+        self.notepad_card, notepad_inner = create_card(self.notes_section, padding=16)
+
+        header_row = tk.Frame(notepad_inner, bg=BG_PANEL)
+        header_row.pack(fill="x")
+
+        self.notepad_title_label = tk.Label(
+            header_row,
+            text="Notepad",
+            font=FONT_SUBHEADING,
+            fg=TEXT_PRIMARY,
+            bg=BG_PANEL,
+        )
+        self.notepad_title_label.pack(side="left")
+
+        self.notepad_status_label = tk.Label(
+            header_row,
+            text="",
+            font=FONT_STAT_LABEL,
+            fg=TEXT_SECONDARY,
+            bg=BG_PANEL,
+        )
+        self.notepad_status_label.pack(side="right")
+
+        body_frame = tk.Frame(notepad_inner, bg=BG_PANEL)
+        body_frame.pack(fill="both", expand=True, pady=(10, 10))
+
+        # The notepad gets its own scrollbar - unlike the page-level
+        # scrolling used everywhere else, a long note is expected to
+        # scroll internally once it outgrows the visible area.
+        self.notepad_text = tk.Text(
+            body_frame,
+            height=12,
+            bg=BG_PANEL_SECONDARY,
+            fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            font=FONT_MONO,
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=12,
+            wrap="word",
+            highlightbackground=BORDER_SOFT,
+            highlightthickness=1,
+            undo=True,
+        )
+        notepad_scrollbar = ttk.Scrollbar(
+            body_frame, orient="vertical", command=self.notepad_text.yview
+        )
+        self.notepad_text.configure(yscrollcommand=notepad_scrollbar.set)
+        self.notepad_text.pack(side="left", fill="both", expand=True)
+        notepad_scrollbar.pack(side="right", fill="y")
+
+        self.notepad_text.bind("<KeyRelease>", self.on_notepad_text_changed)
+
+        button_row = tk.Frame(notepad_inner, bg=BG_PANEL)
+        button_row.pack(fill="x", pady=(10, 0))
+
+        create_primary_button(button_row, "Save Note", self.save_notepad_manually).pack(
+            side="left"
+        )
+
+    def _get_notepad_text(self):
+        # "end-1c" excludes the extra trailing newline Tk's Text widget
+        # always reports, so this matches exactly what the user typed.
+        return self.notepad_text.get("1.0", "end-1c")
+
+    def load_daily_note_into_editor(self, date_key, log=True):
+        """Load the saved notepad body for date_key (empty if nothing was ever saved)."""
+        self._cancel_pending_autosave()
+
+        note = get_daily_note(self.data, date_key)
+        body = note["body"] if note else ""
+
+        self.notepad_text.delete("1.0", tk.END)
+        self.notepad_text.insert("1.0", body)
+        self.notepad_last_saved_body = body
+
+        self.notepad_title_label.config(text=f"Notepad for {date_key}")
+        self._set_notepad_status("Saved" if body else "")
+
+        if log:
+            self.log_activity("daily notepad loaded")
+
+    def on_notepad_text_changed(self, event=None):
+        if self._get_notepad_text() == self.notepad_last_saved_body:
+            self._cancel_pending_autosave()
+            return
+
+        self._set_notepad_status("Unsaved changes")
+        self._cancel_pending_autosave()
+        self._notepad_autosave_after_id = self.root.after(
+            NOTEPAD_AUTOSAVE_DELAY_MS, self._autosave_notepad
+        )
+
+    def _cancel_pending_autosave(self):
+        if self._notepad_autosave_after_id is not None:
+            self.root.after_cancel(self._notepad_autosave_after_id)
+            self._notepad_autosave_after_id = None
+
+    def _autosave_notepad(self):
+        self._notepad_autosave_after_id = None
+        self._save_notepad(source="autosave")
+
+    def save_notepad_manually(self):
+        self._cancel_pending_autosave()
+        self._save_notepad(source="manual")
+
+    def _save_notepad(self, source):
+        """
+        Save the notepad text for the currently selected date if it has
+        actually changed since the last save. Shared by the Save Note
+        button, autosave, switching calendar days, leaving the Notes tab,
+        and closing the app - source only controls the activity log
+        message and is otherwise cosmetic.
+        """
+        current_text = self._get_notepad_text()
+
+        if current_text == self.notepad_last_saved_body:
+            self._set_notepad_status("Saved" if current_text else "")
+            return
+
+        self._set_notepad_status("Saving...")
+        self.root.update_idletasks()
+
+        save_daily_note(self.data, self.selected_note_date_key, current_text)
+        save_data(self.data)
+        self.notepad_last_saved_body = current_text
+
+        self._set_notepad_status("Saved")
+        self.refresh_notes_calendar()
+
+        log_messages = {
+            "manual": "note saved",
+            "autosave": "note saved",
+            "switch": "unsaved changes saved before switching dates",
+            "tab": "unsaved changes saved before leaving notes tab",
+            "close": "unsaved changes saved before closing",
+        }
+        self.log_activity(log_messages.get(source, "note saved"))
+
+    def _set_notepad_status(self, text):
+        colors = {
+            "Saved": SUCCESS,
+            "Saving...": TEXT_SECONDARY,
+            "Unsaved changes": ACCENT_AMBER,
+        }
+        self.notepad_status_label.config(text=text, fg=colors.get(text, TEXT_SECONDARY))
+
+    def on_app_close(self):
+        """Flush any unsaved notepad text before the window actually closes."""
+        self._cancel_pending_autosave()
+        self._save_notepad(source="close")
+        self.root.destroy()
+
 
 def _enable_windows_dpi_awareness():
     """
@@ -1789,4 +2023,5 @@ if __name__ == "__main__":
     _enable_windows_dpi_awareness()
     root = tk.Tk()
     app = TodoGraderApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_app_close)
     root.mainloop()
