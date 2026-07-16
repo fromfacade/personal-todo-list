@@ -255,9 +255,68 @@ def initialize_database(conn):
         )
     """)
 
+    # Cycle-based routines (e.g. a 4-day workout split) that repeat forever
+    # from anchor_date, as an alternative to weekday-based habit_schedule
+    # for things that don't follow a 7-day week. active mirrors habits.active
+    # (soft-delete, so past completions stay linked).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS habit_rotations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            anchor_date TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # The ordered cycle days for one rotation, e.g. position 1 = Chest,
+    # position 4 = Rest. UNIQUE(rotation_id, position) keeps positions
+    # from colliding when a rotation's items are replaced (see
+    # set_habit_rotation_items).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS habit_rotation_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rotation_id INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            difficulty TEXT NOT NULL DEFAULT 'medium',
+            points INTEGER NOT NULL DEFAULT 2,
+            is_rest_day INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(rotation_id, position)
+        )
+    """)
+
+    # Which cycle item was completed on a given date, for a given rotation.
+    # UNIQUE(rotation_id, date_key) - not rotation_item_id - because on any
+    # date only one cycle item is ever "active" for a rotation (determined
+    # by the cycle math), so a rotation can have at most one completion
+    # record per date, exactly like habit_completions per habit.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS habit_rotation_completions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rotation_id INTEGER NOT NULL,
+            rotation_item_id INTEGER NOT NULL,
+            date_key TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT,
+            UNIQUE(rotation_id, date_key)
+        )
+    """)
+
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_tasks_date
         ON tasks(date_key)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_habit_rotation_items_rotation
+        ON habit_rotation_items(rotation_id)
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_habit_rotation_completions_date
+        ON habit_rotation_completions(date_key)
     """)
 
     cursor.execute("""
@@ -866,8 +925,277 @@ def get_scheduled_habits_between_dates(data, start_date_key, end_date_key):
 
 
 def get_day_grade_items(data, date_key):
-    """Tasks plus scheduled habits for one date, ready for calculate_grade."""
-    return get_tasks_for_date(data, date_key) + get_scheduled_habits_for_date(data, date_key)
+    """Tasks plus scheduled habits and rotation items for one date, ready for calculate_grade."""
+    return (
+        get_tasks_for_date(data, date_key)
+        + get_scheduled_habits_for_date(data, date_key)
+        + get_scheduled_rotation_items_for_date(data, date_key)
+    )
+
+
+# --- Habit rotations (cycle-based routines, e.g. a workout split, that
+# repeat on a fixed-length cycle from an anchor date instead of by weekday) ---
+
+
+def _row_to_habit_rotation(row):
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "anchor_date": row["anchor_date"],
+        "active": bool(row["active"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def add_habit_rotation(data, name, anchor_date):
+    """Create a new active rotation with no cycle items yet."""
+    name = name.strip()
+
+    if not name:
+        raise ValueError("Rotation name cannot be empty.")
+
+    cursor = data.cursor()
+    cursor.execute("""
+        INSERT INTO habit_rotations (name, anchor_date, active)
+        VALUES (?, ?, 1)
+    """, (name, anchor_date))
+
+    data.commit()
+    return get_habit_rotation_by_id(data, cursor.lastrowid)
+
+
+def get_habit_rotation_by_id(data, rotation_id):
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT id, name, anchor_date, active, created_at, updated_at
+        FROM habit_rotations
+        WHERE id = ?
+    """, (rotation_id,))
+
+    row = cursor.fetchone()
+    return _row_to_habit_rotation(row) if row else None
+
+
+def get_active_habit_rotations(data):
+    """Return all active rotations (not yet including their cycle items)."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT id, name, anchor_date, active, created_at, updated_at
+        FROM habit_rotations
+        WHERE active = 1
+        ORDER BY id
+    """)
+
+    return [_row_to_habit_rotation(row) for row in cursor.fetchall()]
+
+
+def update_habit_rotation(data, rotation_id, name=None, anchor_date=None):
+    """Update a rotation's name and/or anchor date."""
+    rotation = get_habit_rotation_by_id(data, rotation_id)
+
+    if rotation is None:
+        raise ValueError("Rotation not found.")
+
+    new_name = name.strip() if name is not None else rotation["name"]
+    new_anchor_date = anchor_date if anchor_date is not None else rotation["anchor_date"]
+
+    if not new_name:
+        raise ValueError("Rotation name cannot be empty.")
+
+    cursor = data.cursor()
+    cursor.execute("""
+        UPDATE habit_rotations
+        SET name = ?, anchor_date = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (new_name, new_anchor_date, rotation_id))
+
+    data.commit()
+    return get_habit_rotation_by_id(data, rotation_id)
+
+
+def delete_habit_rotation(data, rotation_id):
+    """Soft-delete a rotation so old completion records stay linked."""
+    cursor = data.cursor()
+
+    cursor.execute("""
+        UPDATE habit_rotations
+        SET active = 0, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    """, (rotation_id,))
+
+    data.commit()
+
+
+def _row_to_rotation_item(row):
+    return {
+        "id": row["id"],
+        "rotation_id": row["rotation_id"],
+        "position": row["position"],
+        "title": row["title"],
+        "difficulty": row["difficulty"],
+        "points": row["points"],
+        "is_rest_day": bool(row["is_rest_day"]),
+    }
+
+
+def get_habit_rotation_items(data, rotation_id):
+    """Return a rotation's cycle items in order (position 1 first)."""
+    cursor = data.cursor()
+    cursor.execute("""
+        SELECT id, rotation_id, position, title, difficulty, points, is_rest_day
+        FROM habit_rotation_items
+        WHERE rotation_id = ?
+        ORDER BY position
+    """, (rotation_id,))
+
+    return [_row_to_rotation_item(row) for row in cursor.fetchall()]
+
+
+def set_habit_rotation_items(data, rotation_id, items):
+    """
+    Replace a rotation's cycle items with the given ordered list of dicts
+    (title, difficulty, points, is_rest_day). Positions are assigned 1..N
+    from list order, same delete-then-insert approach as set_habit_schedule.
+    """
+    cursor = data.cursor()
+    cursor.execute("DELETE FROM habit_rotation_items WHERE rotation_id = ?", (rotation_id,))
+
+    for position, item in enumerate(items, start=1):
+        cursor.execute("""
+            INSERT INTO habit_rotation_items
+                (rotation_id, position, title, difficulty, points, is_rest_day)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            rotation_id,
+            position,
+            item["title"],
+            item["difficulty"],
+            item["points"],
+            1 if item.get("is_rest_day") else 0,
+        ))
+
+    data.commit()
+    return get_habit_rotation_items(data, rotation_id)
+
+
+def get_cycle_index(anchor_date_key, date_key, cycle_length):
+    """
+    Which cycle position (0-based) applies to date_key, for a cycle that
+    starts at anchor_date_key and repeats every cycle_length days:
+
+        days_since_anchor = date_key - anchor_date_key
+        cycle_index = days_since_anchor % cycle_length
+
+    This also works for dates before the anchor date - Python's % on a
+    negative number still returns a result in [0, cycle_length), so the
+    cycle correctly "runs backwards" too instead of erroring out.
+    """
+    if cycle_length <= 0:
+        return None
+
+    anchor_date = date.fromisoformat(anchor_date_key)
+    target_date = date.fromisoformat(date_key)
+    days_since_anchor = (target_date - anchor_date).days
+
+    return days_since_anchor % cycle_length
+
+
+def get_habit_rotation_completion(data, rotation_id, date_key):
+    """Return the completion row for a rotation on a date, or None."""
+    cursor = data.cursor()
+
+    cursor.execute("""
+        SELECT rotation_id, rotation_item_id, date_key, completed, completed_at
+        FROM habit_rotation_completions
+        WHERE rotation_id = ? AND date_key = ?
+    """, (rotation_id, date_key))
+
+    row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "rotation_id": row["rotation_id"],
+        "rotation_item_id": row["rotation_item_id"],
+        "date_key": row["date_key"],
+        "completed": bool(row["completed"]),
+        "completed_at": row["completed_at"],
+    }
+
+
+def set_habit_rotation_completion(data, rotation_id, rotation_item_id, date_key, completed):
+    """Create or update a rotation's completion state for a specific date."""
+    cursor = data.cursor()
+
+    cursor.execute("""
+        INSERT INTO habit_rotation_completions
+            (rotation_id, rotation_item_id, date_key, completed, completed_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(rotation_id, date_key) DO UPDATE SET
+            rotation_item_id = excluded.rotation_item_id,
+            completed = excluded.completed,
+            completed_at = excluded.completed_at
+    """, (rotation_id, rotation_item_id, date_key, 1 if completed else 0))
+
+    data.commit()
+
+
+def get_scheduled_rotation_items_for_date(data, date_key):
+    """
+    Return each active rotation's single applicable cycle item for
+    date_key, shaped like a grade-countable item (has "points"/"completed")
+    plus rotation identity fields - mirrors get_scheduled_habits_for_date
+    so app.py can render/toggle it the same way.
+    """
+    items = []
+
+    for rotation in get_active_habit_rotations(data):
+        rotation_items = get_habit_rotation_items(data, rotation["id"])
+
+        if not rotation_items:
+            continue
+
+        cycle_index = get_cycle_index(rotation["anchor_date"], date_key, len(rotation_items))
+        rotation_item = rotation_items[cycle_index]
+        completion = get_habit_rotation_completion(data, rotation["id"], date_key)
+
+        items.append({
+            "rotation_id": rotation["id"],
+            "rotation_name": rotation["name"],
+            "rotation_item_id": rotation_item["id"],
+            "title": rotation_item["title"],
+            "difficulty": rotation_item["difficulty"],
+            "points": rotation_item["points"],
+            "is_rest_day": rotation_item["is_rest_day"],
+            "completed": bool(completion["completed"]) if completion else False,
+            "date_key": date_key,
+        })
+
+    return items
+
+
+def get_scheduled_rotation_items_between_dates(data, start_date_key, end_date_key):
+    """
+    Return {date_key: [rotation_item, ...]} for every day in the range that
+    has at least one active rotation. Used for weekly/monthly grade rollups.
+    """
+    start = date.fromisoformat(start_date_key)
+    end = date.fromisoformat(end_date_key)
+
+    result = {}
+    current = start
+    while current <= end:
+        date_key = str(current)
+        rotation_items_today = get_scheduled_rotation_items_for_date(data, date_key)
+
+        if rotation_items_today:
+            result[date_key] = rotation_items_today
+
+        current += timedelta(days=1)
+
+    return result
 
 
 # --- Stats query helpers (raw data for stats.py) ---
@@ -899,7 +1227,7 @@ def get_tasks_between_dates(data, start_date_key, end_date_key):
 
 def get_completed_points_by_date(data, start_date_key, end_date_key):
     """Return {date_key: completed_points} for each day in the range, including
-    points from scheduled habits that were completed that day."""
+    points from scheduled habits and rotation items that were completed that day."""
     tasks = get_tasks_between_dates(data, start_date_key, end_date_key)
     points_by_date = {}
 
@@ -918,14 +1246,29 @@ def get_completed_points_by_date(data, start_date_key, end_date_key):
             if item["completed"]:
                 points_by_date[date_key] += item["points"]
 
+    rotation_items_by_date = get_scheduled_rotation_items_between_dates(data, start_date_key, end_date_key)
+    for date_key, rotation_items in rotation_items_by_date.items():
+        points_by_date.setdefault(date_key, 0)
+        for item in rotation_items:
+            if item["completed"]:
+                points_by_date[date_key] += item["points"]
+
     return points_by_date
 
 
 def get_daily_completion_status(data, date_key):
     """
-    Return completion info for one day, combining tasks and any habits
-    scheduled for that weekday. A day counts as fully complete only when it
-    has at least one item (task or scheduled habit) and all are done.
+    Return completion info for one day, combining tasks, habits scheduled
+    for that weekday, and any rotation items assigned to that date. A day
+    counts as fully complete only when it has at least one *point-earning*
+    item and all of those are done.
+
+    Zero-point items (rest-day rotation items) are excluded from the
+    all_completed check on purpose: a rest day should show up and be
+    completable, but forgetting to check it off should never break a
+    streak or block a day from counting as complete - see
+    get_scheduled_rotation_items_for_date / rotations.py for how rest days
+    end up with points = 0.
     """
     items = get_day_grade_items(data, date_key)
 
@@ -945,11 +1288,12 @@ def get_daily_completion_status(data, date_key):
     )
 
     percentage = round((completed_points / total_points) * 100) if total_points else 0
+    point_earning_items = [item for item in items if item["points"] > 0]
 
     return {
         "date_key": date_key,
         "has_tasks": True,
-        "all_completed": all(item["completed"] for item in items),
+        "all_completed": all(item["completed"] for item in point_earning_items),
         "total_points": total_points,
         "completed_points": completed_points,
         "completion_percentage": percentage,

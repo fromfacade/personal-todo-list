@@ -1,6 +1,7 @@
 import os
 import sys
 import tkinter as tk
+from datetime import date
 from tkinter import ttk, messagebox
 
 from calendar_view import CalendarGradeView, FocusCalendarView, NotesCalendarView
@@ -40,17 +41,27 @@ from progression import (
     award_daily_grade_bonus,
     award_focus_goal_bonus,
     award_habit_exp,
+    award_rotation_item_exp,
     award_task_exp,
     get_rank_progress,
     has_reached_max_rank,
     prestige,
     reset_rank,
 )
+from rotations import (
+    create_rotation,
+    edit_rotation,
+    get_upcoming_rotation_schedule,
+    list_rotations,
+    remove_rotation,
+    toggle_rotation_item_on_date,
+)
 from stats import calculate_weekly_focus_stats, calculate_weekly_stats, get_month_grades
 from storage import (
     add_task_to_date,
     delete_task_at_index,
     get_day_grade_items,
+    get_scheduled_rotation_items_for_date,
     get_tasks_for_date,
     get_today_key,
     get_user_progress,
@@ -104,6 +115,9 @@ from theme import (
 # short enough that a few seconds of inactivity is never at risk of being
 # lost (the Save Note button and tab/date/app-close flushes cover the rest).
 NOTEPAD_AUTOSAVE_DELAY_MS = 1200
+
+# How many days ahead the Habits tab's rotation schedule preview shows.
+ROTATION_PREVIEW_DAYS = 14
 
 
 def _load_app_icon(root):
@@ -730,8 +744,9 @@ class TodoGraderApp:
 
         date_key = self.get_selected_date_key()
         habits_today = get_habits_for_date(self.data, date_key)
+        rotation_items_today = get_scheduled_rotation_items_for_date(self.data, date_key)
 
-        if not habits_today:
+        if not habits_today and not rotation_items_today:
             tk.Label(
                 self.planner_habits_frame,
                 text="No habits scheduled for this day.",
@@ -743,6 +758,9 @@ class TodoGraderApp:
 
         for habit_item in habits_today:
             self._build_planner_habit_card(habit_item)
+
+        for rotation_item in rotation_items_today:
+            self._build_planner_rotation_card(rotation_item)
 
     def _build_planner_habit_card(self, habit_item):
         completed = habit_item["completed"]
@@ -832,6 +850,115 @@ class TodoGraderApp:
         else:
             self.log_activity("habit marked incomplete")
 
+    def _build_planner_rotation_card(self, rotation_item):
+        completed = rotation_item["completed"]
+        is_rest_day = rotation_item["is_rest_day"]
+        card_bg = "#171512" if completed else BG_PANEL_SECONDARY
+
+        card = tk.Frame(
+            self.planner_habits_frame,
+            bg=card_bg,
+            highlightbackground=BORDER_MUTED,
+            highlightthickness=1,
+        )
+        card.pack(fill="x", pady=6, padx=4)
+
+        if is_rest_day:
+            tk.Frame(card, bg=BORDER_SOFT, width=4).pack(side="left", fill="y")
+        else:
+            create_difficulty_accent_bar(card, rotation_item["difficulty"]).pack(side="left", fill="y")
+
+        content = tk.Frame(card, bg=card_bg, padx=12, pady=10)
+        content.pack(side="left", fill="both", expand=True)
+
+        top_row = tk.Frame(content, bg=card_bg)
+        top_row.pack(fill="x")
+
+        title_font = ("Segoe UI", 11, "overstrike") if completed else ("Segoe UI", 11, "bold")
+        title_color = TEXT_SECONDARY if completed else TEXT_PRIMARY
+
+        tk.Label(
+            top_row,
+            text=rotation_item["title"],
+            font=title_font,
+            fg=title_color,
+            bg=card_bg,
+        ).pack(side="left")
+
+        create_status_badge(
+            top_row, rotation_item["rotation_name"], bg=BG_PANEL, fg=ACCENT_AMBER
+        ).pack(side="left", padx=(10, 0))
+
+        bottom_row = tk.Frame(content, bg=card_bg)
+        bottom_row.pack(fill="x", pady=(8, 0))
+
+        if is_rest_day:
+            tk.Label(
+                bottom_row,
+                text="Rest day \u2013 0 pts, won't count against your grade or streak",
+                font=FONT_UI,
+                fg=TEXT_SECONDARY,
+                bg=card_bg,
+            ).pack(side="left")
+        else:
+            create_difficulty_chip(bottom_row, rotation_item["difficulty"]).pack(side="left")
+            tk.Label(
+                bottom_row,
+                text=f"{rotation_item['points']} pts",
+                font=FONT_UI,
+                fg=ACCENT_AMBER,
+                bg=card_bg,
+            ).pack(side="left", padx=(10, 0))
+
+        if completed:
+            create_status_badge(bottom_row, "Completed").pack(side="left", padx=(12, 0))
+
+        rotation_id = rotation_item["rotation_id"]
+        rotation_item_id = rotation_item["rotation_item_id"]
+        toggle_button = create_secondary_button if completed else create_primary_button
+        toggle_label = "Mark Incomplete" if completed else ("Mark Rest Done" if is_rest_day else "Mark Complete")
+
+        toggle_button(
+            bottom_row,
+            toggle_label,
+            lambda r=rotation_id, i=rotation_item_id, mark_completed=not completed: (
+                self.toggle_scheduled_rotation_item(r, i, mark_completed)
+            ),
+        ).pack(side="right")
+
+    def toggle_scheduled_rotation_item(self, rotation_id, rotation_item_id, completed):
+        date_key = self.get_selected_date_key()
+        rotation_items_today = get_scheduled_rotation_items_for_date(self.data, date_key)
+        rotation_item = next(
+            (r for r in rotation_items_today if r["rotation_item_id"] == rotation_item_id), None
+        )
+
+        toggle_rotation_item_on_date(self.data, rotation_id, rotation_item_id, completed, date_key=date_key)
+        save_data(self.data)
+
+        self.refresh_scheduled_habits()
+        self.refresh_summary_cards()
+
+        if completed:
+            self.log_activity("rotation item completed")
+
+            # Rest days are worth 0 points on purpose (see rotations.py) -
+            # no EXP for them either, keeping EXP and grade points consistent.
+            if rotation_item is not None and not rotation_item["is_rest_day"]:
+                self._award_and_log_exp(
+                    award_rotation_item_exp(
+                        self.data,
+                        rotation_item_id,
+                        date_key,
+                        rotation_item["difficulty"],
+                        description=f"Completed rotation item: {rotation_item['title']}",
+                    ),
+                    difficulty=rotation_item["difficulty"],
+                    kind="rotation item",
+                )
+        else:
+            self.log_activity("rotation item marked incomplete")
+
     # --- Habits ---
 
     def _build_habits_tab(self):
@@ -891,6 +1018,31 @@ class TodoGraderApp:
 
         self.habits_frame = tk.Frame(list_inner, bg=BG_PANEL)
         self.habits_frame.pack(fill="both", expand=True)
+
+        # Rotations are cycle-based routines (e.g. a workout split) that
+        # repeat on a fixed-length cycle from an anchor date instead of by
+        # weekday - kept in their own card, never grouped under a weekday,
+        # since that grouping would not make sense for them.
+        rotations_card, rotations_inner = create_card(self.habits_section, padding=12)
+        rotations_card.pack(fill="both", expand=True, pady=(12, 0))
+
+        rotations_header = tk.Frame(rotations_inner, bg=BG_PANEL)
+        rotations_header.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            rotations_header,
+            text="Workout Rotations",
+            font=FONT_SUBHEADING,
+            fg=TEXT_PRIMARY,
+            bg=BG_PANEL,
+        ).pack(side="left")
+
+        create_primary_button(
+            rotations_header, "+ New Rotation", lambda: self.open_rotation_dialog()
+        ).pack(side="right")
+
+        self.rotations_frame = tk.Frame(rotations_inner, bg=BG_PANEL)
+        self.rotations_frame.pack(fill="both", expand=True)
 
     def _build_weekday_checkboxes(self, parent):
         """Row of 7 weekday checkboxes. Returns (row_frame, {weekday_index: BooleanVar})."""
@@ -1075,6 +1227,11 @@ class TodoGraderApp:
             unscheduled_habits = sorted(unscheduled_habits, key=lambda h: h["title"].lower())
             self._build_weekday_habit_section("Unscheduled", unscheduled_habits, is_first=False)
 
+        # Every call site that refreshes the weekday habit list should also
+        # see up-to-date rotations, so this piggybacks on refresh_habits
+        # instead of every caller needing its own extra call.
+        self.refresh_rotations()
+
     def _build_weekday_habit_section(self, day_name, day_habits, is_first):
         section = tk.Frame(self.habits_frame, bg=BG_PANEL)
         section.pack(fill="x", pady=(0 if is_first else 14, 0))
@@ -1163,6 +1320,274 @@ class TodoGraderApp:
             "Delete",
             lambda h=habit["id"]: self.delete_habit(h),
         ).pack(side="left")
+
+    # --- Habit rotations (cycle-based routines, e.g. a workout split) ---
+
+    def refresh_rotations(self):
+        for widget in self.rotations_frame.winfo_children():
+            widget.destroy()
+
+        rotations = list_rotations(self.data)
+
+        if not rotations:
+            tk.Label(
+                self.rotations_frame,
+                text=(
+                    "No rotations yet. Add one for cycle-based routines "
+                    "that don't follow a 7-day week, like a workout split."
+                ),
+                font=FONT_UI,
+                fg=TEXT_SECONDARY,
+                bg=BG_PANEL,
+                wraplength=520,
+                justify="left",
+            ).pack(anchor="w", pady=24, padx=8)
+            return
+
+        for index, rotation in enumerate(rotations):
+            self._build_rotation_card(rotation, is_first=(index == 0))
+
+    def _build_rotation_card(self, rotation, is_first):
+        card, inner = create_card(self.rotations_frame, padding=14)
+        card.pack(fill="x", pady=(0 if is_first else 12, 0))
+
+        header_row = tk.Frame(inner, bg=BG_PANEL)
+        header_row.pack(fill="x")
+
+        tk.Label(
+            header_row,
+            text=rotation["name"],
+            font=("Segoe UI", 12, "bold"),
+            fg=TEXT_PRIMARY,
+            bg=BG_PANEL,
+        ).pack(side="left")
+
+        actions = tk.Frame(header_row, bg=BG_PANEL)
+        actions.pack(side="right")
+
+        create_secondary_button(
+            actions, "Edit", lambda r=rotation: self.open_rotation_dialog(r)
+        ).pack(side="left", padx=(0, 6))
+
+        create_danger_button(
+            actions, "Delete", lambda r=rotation["id"]: self.delete_rotation_ui(r)
+        ).pack(side="left")
+
+        tk.Label(
+            inner,
+            text=f"Anchor date: {rotation['anchor_date']}  \u2022  {len(rotation['items'])}-day cycle",
+            font=FONT_STAT_LABEL,
+            fg=TEXT_SECONDARY,
+            bg=BG_PANEL,
+        ).pack(anchor="w", pady=(2, 10))
+
+        for item in rotation["items"]:
+            detail = "Rest day - 0 pts" if item["is_rest_day"] else f"{item['points']} pts ({item['difficulty']})"
+            tk.Label(
+                inner,
+                text=f"Day {item['position']} \u2013 {item['title']}  \u00b7  {detail}",
+                font=FONT_UI,
+                fg=TEXT_SECONDARY if item["is_rest_day"] else TEXT_PRIMARY,
+                bg=BG_PANEL,
+            ).pack(anchor="w", pady=1)
+
+        tk.Frame(inner, bg=BORDER_MUTED, height=1).pack(fill="x", pady=(10, 8))
+
+        tk.Label(
+            inner,
+            text=f"Upcoming schedule (next {ROTATION_PREVIEW_DAYS} days):",
+            font=FONT_UI_BOLD,
+            fg=TEXT_PRIMARY,
+            bg=BG_PANEL,
+        ).pack(anchor="w", pady=(0, 4))
+
+        preview = get_upcoming_rotation_schedule(rotation, num_days=ROTATION_PREVIEW_DAYS)
+        for day in preview:
+            line = f"{day['weekday_short']} {day['display_date']}: {day['title']}"
+            tk.Label(
+                inner,
+                text=line,
+                font=FONT_UI,
+                fg=TEXT_SECONDARY if day["is_rest_day"] else ACCENT_AMBER,
+                bg=BG_PANEL,
+            ).pack(anchor="w")
+
+    def delete_rotation_ui(self, rotation_id):
+        remove_rotation(self.data, rotation_id)
+        save_data(self.data)
+        self.refresh_rotations()
+        self.refresh_scheduled_habits()
+        self.refresh_summary_cards()
+        self.log_activity("rotation deleted")
+
+    def open_rotation_dialog(self, rotation=None):
+        """
+        One dialog handles both creating and editing a rotation. Each cycle
+        day is its own row (title / difficulty / rest-day checkbox) that
+        can be added or removed - editing just pre-fills those rows from
+        rotation["items"] instead of the example template.
+        """
+        is_edit = rotation is not None
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Rotation" if is_edit else "New Rotation")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        style_toplevel(dialog)
+        dialog.resizable(False, True)
+
+        tk.Label(
+            dialog, text="Rotation name", fg=TEXT_SECONDARY, bg=BG_PANEL, font=FONT_UI,
+        ).grid(row=0, column=0, padx=12, pady=10, sticky="w")
+
+        name_entry = ttk.Entry(dialog, width=36)
+        name_entry.grid(row=0, column=1, padx=12, pady=10, sticky="w")
+        name_entry.insert(0, rotation["name"] if is_edit else "Workout Split")
+
+        tk.Label(
+            dialog, text="Anchor / start date", fg=TEXT_SECONDARY, bg=BG_PANEL, font=FONT_UI,
+        ).grid(row=1, column=0, padx=12, pady=10, sticky="w")
+
+        anchor_entry = ttk.Entry(dialog, width=36)
+        anchor_entry.grid(row=1, column=1, padx=12, pady=10, sticky="w")
+        anchor_entry.insert(0, rotation["anchor_date"] if is_edit else get_today_key())
+
+        tk.Label(
+            dialog,
+            text="Day 1 of the cycle lands on this date (YYYY-MM-DD).",
+            fg=TEXT_SECONDARY,
+            bg=BG_PANEL,
+            font=FONT_STAT_LABEL,
+        ).grid(row=2, column=0, columnspan=2, padx=12, sticky="w")
+
+        tk.Label(
+            dialog, text="Cycle days", fg=TEXT_SECONDARY, bg=BG_PANEL, font=FONT_UI,
+        ).grid(row=3, column=0, padx=12, pady=(14, 4), sticky="nw")
+
+        rows_container = tk.Frame(dialog, bg=BG_PANEL)
+        rows_container.grid(row=3, column=1, padx=12, pady=(14, 4), sticky="w")
+
+        row_widgets = []
+
+        def renumber_rows():
+            for position, row in enumerate(row_widgets, start=1):
+                row["day_label"].config(text=f"Day {position}")
+
+        def remove_row(row):
+            row["frame"].destroy()
+            row_widgets.remove(row)
+            renumber_rows()
+
+        def add_row(title="", difficulty="medium", is_rest_day=False):
+            row_frame = tk.Frame(rows_container, bg=BG_PANEL)
+            row_frame.pack(fill="x", pady=3)
+
+            day_label = tk.Label(
+                row_frame, text="Day", fg=TEXT_SECONDARY, bg=BG_PANEL, font=FONT_UI, width=6, anchor="w",
+            )
+            day_label.pack(side="left")
+
+            title_entry = ttk.Entry(row_frame, width=20)
+            title_entry.pack(side="left", padx=(0, 6))
+            title_entry.insert(0, title)
+
+            difficulty_box = ttk.Combobox(
+                row_frame, values=["easy", "medium", "hard"], state="readonly", width=9,
+            )
+            difficulty_box.set(difficulty)
+            difficulty_box.pack(side="left", padx=(0, 6))
+
+            rest_var = tk.BooleanVar(value=is_rest_day)
+
+            def on_rest_toggle():
+                difficulty_box.config(state="disabled" if rest_var.get() else "readonly")
+
+            rest_check = ttk.Checkbutton(
+                row_frame, text="Rest day", variable=rest_var, command=on_rest_toggle,
+            )
+            rest_check.pack(side="left", padx=(0, 6))
+
+            row = {
+                "frame": row_frame,
+                "day_label": day_label,
+                "title_entry": title_entry,
+                "difficulty_box": difficulty_box,
+                "rest_var": rest_var,
+            }
+
+            create_danger_button(row_frame, "Remove", lambda: remove_row(row)).pack(side="left")
+
+            row_widgets.append(row)
+            renumber_rows()
+            on_rest_toggle()
+
+        if is_edit:
+            for item in rotation["items"]:
+                add_row(item["title"], item["difficulty"], item["is_rest_day"])
+        else:
+            # A ready-to-go example matching the workout split from the
+            # feature request - the user can rename/retype every field.
+            add_row("Chest", "medium", False)
+            add_row("Back and Biceps", "medium", False)
+            add_row("Legs", "medium", False)
+            add_row("Rest", "medium", True)
+
+        create_secondary_button(
+            dialog, "+ Add Day", lambda: add_row()
+        ).grid(row=4, column=1, padx=12, pady=(0, 10), sticky="w")
+
+        button_frame = tk.Frame(dialog, bg=BG_PANEL)
+        button_frame.grid(row=5, column=0, columnspan=2, pady=14)
+
+        def save_rotation():
+            name = name_entry.get().strip()
+            anchor_date_key = anchor_entry.get().strip()
+
+            if not name:
+                messagebox.showwarning("Empty Rotation", "Rotation name can't be empty.")
+                return
+
+            try:
+                date.fromisoformat(anchor_date_key)
+            except ValueError:
+                messagebox.showwarning("Invalid Date", "Enter the anchor date as YYYY-MM-DD.")
+                return
+
+            items = [
+                {
+                    "title": row["title_entry"].get().strip(),
+                    "difficulty": row["difficulty_box"].get(),
+                    "is_rest_day": row["rest_var"].get(),
+                }
+                for row in row_widgets
+                if row["title_entry"].get().strip()
+            ]
+
+            if not items:
+                messagebox.showwarning("Empty Rotation", "Add at least one cycle day.")
+                return
+
+            try:
+                if is_edit:
+                    edit_rotation(
+                        self.data, rotation["id"], name=name, anchor_date=anchor_date_key, items=items
+                    )
+                else:
+                    create_rotation(self.data, name, anchor_date_key, items)
+
+                save_data(self.data)
+            except ValueError as error:
+                messagebox.showerror("Save Failed", str(error))
+                return
+
+            dialog.destroy()
+            self.refresh_rotations()
+            self.refresh_scheduled_habits()
+            self.refresh_summary_cards()
+            self.log_activity(f"rotation {'updated' if is_edit else 'created'}: {name}")
+
+        create_primary_button(button_frame, "Save", save_rotation).pack(side="left", padx=6)
+        create_secondary_button(button_frame, "Cancel", dialog.destroy).pack(side="left", padx=6)
 
     # --- Stats ---
 

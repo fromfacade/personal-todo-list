@@ -660,18 +660,20 @@ def create_scrollable_frame(parent, bg=BG_APP):
         # Button-4 (scroll up) / Button-5 (scroll down) button events.
         canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
 
-    def _bind_mousewheel(_event):
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        canvas.bind_all("<Button-4>", _on_mousewheel_linux)
-        canvas.bind_all("<Button-5>", _on_mousewheel_linux)
-
-    def _unbind_mousewheel(_event):
-        canvas.unbind_all("<MouseWheel>")
-        canvas.unbind_all("<Button-4>")
-        canvas.unbind_all("<Button-5>")
-
-    canvas.bind("<Enter>", _bind_mousewheel)
-    canvas.bind("<Leave>", _unbind_mousewheel)
+    # Bound once, for good, instead of toggling on the canvas's <Enter>/
+    # <Leave> events. That toggle used to be how this worked, but any card
+    # rebuild that destroys a widget while the mouse is sitting on top of it
+    # (e.g. clicking a task's checkbox, which triggers a full task-list
+    # refresh) makes Tk deliver a <Leave> to the canvas with no matching
+    # <Enter> afterwards (the pointer never actually moves), which called
+    # unbind_all and never rebound - permanently killing mousewheel
+    # scrolling app-wide until restart. bind_all is safe to leave on
+    # permanently here because this function is only ever called once for
+    # the app's single scrollable content area, so there is no other
+    # scrollable region whose wheel events this could ever steal.
+    canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+    canvas.bind_all("<Button-5>", _on_mousewheel_linux)
 
     return container, scroll_frame
 

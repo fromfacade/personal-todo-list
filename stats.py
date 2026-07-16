@@ -13,6 +13,7 @@ from storage import (
     get_daily_completion_status,
     get_focus_goals_between_dates,
     get_scheduled_habits_between_dates,
+    get_scheduled_rotation_items_between_dates,
     get_studied_minutes_between_dates,
     get_tasks_between_dates,
     get_today_key,
@@ -55,7 +56,12 @@ def calculate_weekly_stats(conn, reference_date=None):
     start_key, end_key = get_week_range(reference_date)
     week_tasks = get_tasks_between_dates(conn, start_key, end_key)
     week_habits_by_date = get_scheduled_habits_between_dates(conn, start_key, end_key)
-    week_grade = calculate_grade(week_tasks + _flatten_habit_items(week_habits_by_date))
+    week_rotation_items_by_date = get_scheduled_rotation_items_between_dates(conn, start_key, end_key)
+    week_grade = calculate_grade(
+        week_tasks
+        + _flatten_habit_items(week_habits_by_date)
+        + _flatten_habit_items(week_rotation_items_by_date)
+    )
 
     total_points = week_grade["total_points"]
     completed_points = week_grade["completed_points"]
@@ -146,11 +152,11 @@ def _get_best_day(points_by_date):
 def get_month_grades(conn, year, month):
     """
     Return {date_key: grade_dict} for every day in the given month that has
-    tasks and/or scheduled habits.
+    tasks, scheduled habits, and/or rotation items.
 
     This reuses calculate_grade so the grading logic itself is not duplicated.
-    A day with only scheduled habits (no normal tasks) still gets a grade,
-    since we combine both lists before grading.
+    A day with only scheduled habits/rotation items (no normal tasks) still
+    gets a grade, since we combine all three lists before grading.
     """
     start_key = f"{year:04d}-{month:02d}-01"
     last_day_of_month = calendar_module.monthrange(year, month)[1]
@@ -158,16 +164,19 @@ def get_month_grades(conn, year, month):
 
     month_tasks = get_tasks_between_dates(conn, start_key, end_key)
     habits_by_date = get_scheduled_habits_between_dates(conn, start_key, end_key)
+    rotation_items_by_date = get_scheduled_rotation_items_between_dates(conn, start_key, end_key)
 
     tasks_by_date = {}
     for task in month_tasks:
         tasks_by_date.setdefault(task["date_key"], []).append(task)
 
-    all_date_keys = set(tasks_by_date) | set(habits_by_date)
+    all_date_keys = set(tasks_by_date) | set(habits_by_date) | set(rotation_items_by_date)
 
     return {
         date_key: calculate_grade(
-            tasks_by_date.get(date_key, []) + habits_by_date.get(date_key, [])
+            tasks_by_date.get(date_key, [])
+            + habits_by_date.get(date_key, [])
+            + rotation_items_by_date.get(date_key, [])
         )
         for date_key in all_date_keys
     }

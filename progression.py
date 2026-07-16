@@ -204,6 +204,32 @@ def award_habit_exp(data, habit_id, date_key, difficulty, description=None):
     return _apply_exp_gain(data, exp_amount)
 
 
+def award_rotation_item_exp(data, rotation_item_id, date_key, difficulty, description=None):
+    """
+    Award EXP for completing a rotation's cycle item on a date, once per
+    item per date. Uses its own source_type ("rotation_item") so its id
+    space never collides with task/habit ids sharing the same date. Never
+    called for rest-day items (app.py skips those - they're worth 0
+    points, so no EXP either).
+    """
+    current_epoch = get_user_progress(data)["progression_epoch"]
+    exp_amount = get_exp_for_difficulty(difficulty)
+    was_awarded = add_exp_event(
+        data,
+        date_key=date_key,
+        source_type="rotation_item",
+        source_id=rotation_item_id,
+        exp_amount=exp_amount,
+        description=description,
+        progression_epoch=current_epoch,
+    )
+
+    if not was_awarded:
+        return None
+
+    return _apply_exp_gain(data, exp_amount)
+
+
 def award_focus_goal_bonus(data, date_key, description="Daily study goal reached"):
     """
     Award a once-per-day bonus for reaching that day's study goal. Safe to

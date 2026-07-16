@@ -27,7 +27,15 @@ def calculate_grade(tasks):
         task["points"] for task in tasks if task["completed"]
     )
 
-    percentage = round((completed_points / total_points) * 100)
+    if total_points == 0:
+        # Everything scheduled for this day is worth 0 points (e.g. only a
+        # rest-day rotation item, nothing else). There's nothing to divide
+        # by and nothing that should count against the grade either way,
+        # so treat it as a perfect day rather than crashing or showing 0%.
+        percentage = 100
+    else:
+        percentage = round((completed_points / total_points) * 100)
+
     letter = get_letter_grade(percentage)
 
     return {
